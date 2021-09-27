@@ -27,10 +27,10 @@ import (
 	"testing"
 	"time"
 
-	"cloud.google.com/go/internal/testutil"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 	btapb "google.golang.org/genproto/googleapis/bigtable/admin/v2"
 	btpb "google.golang.org/genproto/googleapis/bigtable/v2"
 	"google.golang.org/grpc"
@@ -170,9 +170,7 @@ func TestCreateTableResponse(t *testing.T) {
 			"cf2": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 456}}},
 		},
 	}
-	if diff := testutil.Diff(got, want); diff != "" {
-		t.Fatalf("Response mismatch: got - want +\n%s", diff)
-	}
+	require.Equal(t, want, got)
 }
 
 func TestCreateTableWithFamily(t *testing.T) {

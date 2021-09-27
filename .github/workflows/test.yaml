@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:         {branches: [master]}
+  pull_request: {branches: [master]}
+
+jobs:
+  test:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        imgtag:
+          - "golang:1.17-bullseye"
+        goarch:
+          - "amd64"
+          - "386"
+
+    container: "${{matrix.imgtag}}"
+    env:
+      GOPATH: "${{github.workspace}}/go"
+      GOARCH: "${{matrix.goarch}}"
+      SRCDIR: "go/src/github.com/bitly/little_bigtable"
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: ${{env.SRCDIR}}
+
+      - name: build
+        run: |
+          cd $SRCDIR
+          make all
+      - name: test
+        run: |
+          cd $SRCDIR
+          ./test.sh
+

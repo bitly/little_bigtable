@@ -12,7 +12,6 @@ import (
 
 	"github.com/bitly/little_bigtable/bttest"
 	"github.com/go-sql-driver/mysql"
-	_ "github.com/go-sql-driver/mysql"
 	"google.golang.org/grpc"
 )
 
@@ -44,6 +43,9 @@ func main() {
 	db.SetConnMaxLifetime(time.Minute * 3)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(10)
+
+	// ping so we can log about connection errors early
+	// and so we can detect when the database doesn't exist
 	if err := db.Ping(); err != nil {
 		if e, ok := err.(*mysql.MySQLError); ok {
 			switch e.Number {
@@ -71,7 +73,7 @@ func main() {
 		grpc.MaxRecvMsgSize(maxMsgSize),
 		grpc.MaxSendMsgSize(maxMsgSize),
 	}
-	srv, err := bttest.NewServer(fmt.Sprintf("%s:%d", *host, *port), opts...)
+	srv, err := bttest.NewServer(fmt.Sprintf("%s:%d", *host, *port), db, opts...)
 	if err != nil {
 		log.Fatalf("failed to start emulator: %v", err)
 	}

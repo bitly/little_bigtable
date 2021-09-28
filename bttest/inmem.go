@@ -89,7 +89,7 @@ type server struct {
 	instances    map[string]*btapb.Instance // keyed by fully qualified name
 	gcc          chan int                   // set when gcloop starts, closed when server shuts down
 	db           *sql.DB
-	tableBackend *MysqlTables
+	tableBackend *SqlTables
 
 	// Any unimplemented methods will cause a panic.
 	btapb.BigtableTableAdminServer
@@ -114,7 +114,7 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 			tables:       make(map[string]*table),
 			instances:    make(map[string]*btapb.Instance),
 			db:           db,
-			tableBackend: NewMysqlTables(db),
+			tableBackend: NewSqlTables(db),
 		},
 	}
 	s.s.LoadTables()
@@ -1187,7 +1187,7 @@ type table struct {
 	mu       sync.RWMutex
 	counter  uint64                   // increment by 1 when a new family is created
 	families map[string]*columnFamily // keyed by plain family name
-	rows     *MysqlRows               // indexed by row key
+	rows     *SqlRows                 // indexed by row key
 }
 
 const btreeDegree = 16
@@ -1210,7 +1210,7 @@ func newTable(ctr *btapb.CreateTableRequest, db *sql.DB) *table {
 		tableId:  ctr.TableId,
 		families: fams,
 		counter:  c,
-		rows:     NewMysqlRows(db, ctr.Parent, ctr.TableId),
+		rows:     NewSqlRows(db, ctr.Parent, ctr.TableId),
 	}
 }
 

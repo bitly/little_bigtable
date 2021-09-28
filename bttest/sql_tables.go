@@ -6,15 +6,17 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log"
+
+	"github.com/mattn/go-sqlite3"
 )
 
-// MysqlTables persists tables
-type MysqlTables struct {
+// SqlTables persists tables to tables_t
+type SqlTables struct {
 	db *sql.DB
 }
 
-func NewMysqlTables(db *sql.DB) *MysqlTables {
-	return &MysqlTables{
+func NewSqlTables(db *sql.DB) *SqlTables {
+	return &SqlTables{
 		db: db,
 	}
 }
@@ -45,23 +47,23 @@ func (t *table) Bytes() ([]byte, error) {
 	return b.Bytes(), err
 }
 
-func (db *MysqlTables) Get(parent, tableId string) *table {
+func (db *SqlTables) Get(parent, tableId string) *table {
 	tbl := &table{
 		parent:  parent,
 		tableId: tableId,
-		rows:    NewMysqlRows(db.db, parent, tableId),
+		rows:    NewSqlRows(db.db, parent, tableId),
 	}
-	err := db.db.QueryRow("SELECT metadata FROM tables_t WHERE parent = ? and table_id = ?", parent, tableId).Scan(tbl)
+	err := db.db.QueryRow("SELECT metadata FROM tables_t WHERE parent = ? AND table_id = ?", parent, tableId).Scan(tbl)
 	if err == sql.ErrNoRows {
 		return nil
 	}
 	return tbl
 }
 
-func (db *MysqlTables) GetAll() []*table {
+func (db *SqlTables) GetAll() []*table {
 	var tables []*table
 
-	rows, err := db.db.Query("SELECT parent, table_id, metadata from tables_t")
+	rows, err := db.db.Query("SELECT parent, table_id, metadata FROM tables_t")
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -74,7 +76,7 @@ func (db *MysqlTables) GetAll() []*table {
 		if err := rows.Scan(&t.parent, &t.tableId, &t); err != nil {
 			log.Fatal(err)
 		}
-		t.rows = NewMysqlRows(db.db, t.parent, t.tableId)
+		t.rows = NewSqlRows(db.db, t.parent, t.tableId)
 		tables = append(tables, &t)
 	}
 	if err := rows.Err(); err != nil {
@@ -83,19 +85,22 @@ func (db *MysqlTables) GetAll() []*table {
 	return tables
 }
 
-func (db *MysqlTables) Save(t *table) {
+func (db *SqlTables) Save(t *table) {
 	metadata, err := t.Bytes()
 	if err != nil {
 		log.Fatal(err)
 	}
-	_, err = db.db.Exec("INSERT INTO tables_t (parent, table_id, metadata) values (?, ?, ?) ON DUPLICATE KEY UPDATE metadata = ?", t.parent, t.tableId, metadata, metadata)
+	_, err = db.db.Exec("INSERT INTO tables_t (parent, table_id, metadata) VALUES (?, ?, ?)", t.parent, t.tableId, metadata)
+	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
+		_, err = db.db.Exec("UPDATE tables_t SET metadata = ? WHERE parent = ? AND table_id = ?", metadata, t.parent, t.tableId)
+	}
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("%#v", err)
 	}
 }
 
-func (db *MysqlTables) Delete(t *table) {
-	_, err := db.db.Exec("DELETE FROM tables_t WHERE parent = ? and table_id = ? ", t.parent, t.tableId)
+func (db *SqlTables) Delete(t *table) {
+	_, err := db.db.Exec("DELETE FROM tables_t WHERE parent = ? AND table_id = ? ", t.parent, t.tableId)
 	if err != nil {
 		log.Fatal(err)
 	}

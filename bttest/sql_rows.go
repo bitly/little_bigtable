@@ -8,19 +8,22 @@ import (
 	"log"
 
 	"github.com/google/btree"
+	"github.com/mattn/go-sqlite3"
 )
 
-// MysqlRows is a backend modeled on the github.com/google/btree interface
+// SqlRows is a backend modeled on the github.com/google/btree interface
 // all errors are considered fatal
-type MysqlRows struct {
+//
+// rows are persisted in rows_t
+type SqlRows struct {
 	parent  string // Values are of the form `projects/{project}/instances/{instance}`.
 	tableId string // The name by which the new table should be referred to within the parent instance
 
 	db *sql.DB
 }
 
-func NewMysqlRows(db *sql.DB, parent, tableId string) *MysqlRows {
-	return &MysqlRows{
+func NewSqlRows(db *sql.DB, parent, tableId string) *SqlRows {
+	return &SqlRows{
 		parent:  parent,
 		tableId: tableId,
 		db:      db,
@@ -51,7 +54,7 @@ func (r *row) Bytes() ([]byte, error) {
 type ItemIterator = btree.ItemIterator
 type Item = btree.Item
 
-func (db *MysqlRows) query(iterator ItemIterator, query string, args ...interface{}) {
+func (db *SqlRows) query(iterator ItemIterator, query string, args ...interface{}) {
 	rows, err := db.db.Query(query, args...)
 	if err == sql.ErrNoRows {
 		return
@@ -72,27 +75,27 @@ func (db *MysqlRows) query(iterator ItemIterator, query string, args ...interfac
 	}
 }
 
-func (db *MysqlRows) Ascend(iterator ItemIterator) {
+func (db *SqlRows) Ascend(iterator ItemIterator) {
 	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? ORDER BY row_key ASC", db.parent, db.tableId)
 }
 
-func (db *MysqlRows) AscendGreaterOrEqual(pivot Item, iterator ItemIterator) {
+func (db *SqlRows) AscendGreaterOrEqual(pivot Item, iterator ItemIterator) {
 	row := pivot.(*row)
 	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key ASC", db.parent, db.tableId, row.key)
 }
 
-func (db *MysqlRows) AscendLessThan(pivot Item, iterator ItemIterator) {
+func (db *SqlRows) AscendLessThan(pivot Item, iterator ItemIterator) {
 	row := pivot.(*row)
 	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, row.key)
 }
 
-func (db *MysqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
+func (db *SqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
 	ge := greaterOrEqual.(*row)
 	lt := lessThan.(*row)
 	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, ge.key, lt.key)
 }
 
-func (db *MysqlRows) DeleteAll() {
+func (db *SqlRows) DeleteAll() {
 	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId)
 	if err != nil {
 		log.Fatal(err)
@@ -100,7 +103,7 @@ func (db *MysqlRows) DeleteAll() {
 
 }
 
-func (db *MysqlRows) Delete(item Item) {
+func (db *SqlRows) Delete(item Item) {
 	row := item.(*row)
 	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key)
 	if err != nil {
@@ -108,7 +111,7 @@ func (db *MysqlRows) Delete(item Item) {
 	}
 }
 
-func (db *MysqlRows) Get(key Item) Item {
+func (db *SqlRows) Get(key Item) Item {
 	row := key.(*row)
 	if row.families == nil {
 		row.families = make(map[string]*family)
@@ -123,7 +126,7 @@ func (db *MysqlRows) Get(key Item) Item {
 	return row
 }
 
-func (db *MysqlRows) Len() int {
+func (db *SqlRows) Len() int {
 	var count int
 	err := db.db.QueryRow("SELECT count(*) FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId).Scan(&count)
 	if err != nil {
@@ -132,13 +135,17 @@ func (db *MysqlRows) Len() int {
 	return count
 }
 
-func (db *MysqlRows) ReplaceOrInsert(item Item) Item {
+func (db *SqlRows) ReplaceOrInsert(item Item) Item {
 	row := item.(*row)
 	families, err := row.Bytes()
 	if err != nil {
 		log.Fatal(err)
 	}
-	_, err = db.db.Exec("INSERT INTO rows_t (parent, table_id, row_key, families) values (?, ?, ?, ?) ON DUPLICATE KEY UPDATE families = ?", db.parent, db.tableId, row.key, families, families)
+
+	_, err = db.db.Exec("INSERT INTO rows_t (parent, table_id, row_key, families) values (?, ?, ?, ?)", db.parent, db.tableId, row.key, families)
+	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
+		_, err = db.db.Exec("UPDATE rows_t SET families = ? WHERE parent = ? AND table_id = ? AND row_key = ?", families, db.parent, db.tableId, row.key)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}

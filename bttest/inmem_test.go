@@ -50,7 +50,6 @@ func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	const name = `cluster/tables/t`
-	tbl := s.tables[name]
 	req := &btapb.ModifyColumnFamiliesRequest{
 		Name: name,
 		Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{{
@@ -121,11 +120,6 @@ func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
 			}
 		}()
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			tbl.gc()
-		}()
 	}
 	done := make(chan struct{})
 	go func() {
@@ -1635,8 +1629,8 @@ func TestFilterRow(t *testing.T) {
 		key: "row",
 		families: map[string]*family{
 			"fam": {
-				name: "fam",
-				cells: map[string][]cell{
+				Name: "fam",
+				Cells: map[string][]cell{
 					"col": {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
@@ -1687,8 +1681,8 @@ func TestFilterRowWithErrors(t *testing.T) {
 		key: "row",
 		families: map[string]*family{
 			"fam": {
-				name: "fam",
-				cells: map[string][]cell{
+				Name: "fam",
+				Cells: map[string][]cell{
 					"col": {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
@@ -1757,8 +1751,8 @@ func TestFilterRowWithBinaryColumnQualifier(t *testing.T) {
 		key: string(rs),
 		families: map[string]*family{
 			"fam": {
-				name: "fam",
-				cells: map[string][]cell{
+				Name: "fam",
+				Cells: map[string][]cell{
 					string(rs): {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
@@ -1788,8 +1782,8 @@ func TestFilterRowWithUnicodeColumnQualifier(t *testing.T) {
 		key: string(rs),
 		families: map[string]*family{
 			"fam": {
-				name: "fam",
-				cells: map[string][]cell{
+				Name: "fam",
+				Cells: map[string][]cell{
 					string(rs): {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
@@ -2081,15 +2075,15 @@ func TestFilterRowCellsPerRowLimitFilterTruthiness(t *testing.T) {
 		key: "row",
 		families: map[string]*family{
 			"fam": {
-				name: "fam",
-				cells: map[string][]cell{
+				Name: "fam",
+				Cells: map[string][]cell{
 					"col1": {{Ts: 1000, Value: []byte("val2")}},
 					"col2": {
 						{Ts: 1000, Value: []byte("val2")},
 						{Ts: 1000, Value: []byte("val3")},
 					},
 				},
-				colNames: []string{"col1", "col2"},
+				ColNames: []string{"col1", "col2"},
 			},
 		},
 	}

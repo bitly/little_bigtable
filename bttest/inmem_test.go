@@ -17,9 +17,11 @@ package bttest
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -38,10 +40,41 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
+// newDBFile returns an unused uniqute temp filename
+func newDBFile(t *testing.T) string {
+	f, err := os.CreateTemp("", "little_bigtable*.db")
+	if err != nil {
+		t.Fatal(err)
 	}
+	fn := f.Name()
+	f.Close()
+	err = os.Remove(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(fn) })
+	return fn
+}
+
+func newTestServer(t *testing.T) *server {
+	dbFilename := newDBFile(t)
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", dbFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	CreateTables(context.Background(), db)
+
+	s := &server{
+		tables:       make(map[string]*table),
+		db:           db,
+		tableBackend: NewSqlTables(db),
+	}
+	return s
+}
+
+func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
+	s := newTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, err := s.CreateTable(
@@ -137,9 +170,7 @@ func TestCreateTableResponse(t *testing.T) {
 	// We need to ensure that invoking CreateTable returns
 	// the  ColumnFamilies as well as Granularity.
 	// See issue https://github.com/googleapis/google-cloud-go/issues/1512.
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	got, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
 		Parent:  "projects/issue-1512/instances/instance",
@@ -172,9 +203,7 @@ func TestCreateTableWithFamily(t *testing.T) {
 	// in one operation but it is allowed by the API. This must still be supported by the
 	// fake server so this test lives here instead of in the main bigtable
 	// integration test.
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
@@ -217,9 +246,7 @@ func (s *MockSampleRowKeysServer) Send(resp *btpb.SampleRowKeysResponse) error {
 }
 
 func TestSampleRowKeys(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
@@ -270,9 +297,7 @@ func TestSampleRowKeys(t *testing.T) {
 type AntagonistFunction func(s *server, attempts int, tblName string, finished chan (bool))
 
 func SampleRowKeysConcurrentTest(t *testing.T, antagonist AntagonistFunction) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
@@ -392,9 +417,7 @@ func TestSampleRowKeysVsModifyColumnFamilies(t *testing.T) {
 }
 
 func TestModifyColumnFamilies(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	tblInfo, err := populateTable(ctx, s)
 	if err != nil {
@@ -460,9 +483,7 @@ func TestModifyColumnFamilies(t *testing.T) {
 }
 
 func TestDropRowRange(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
@@ -602,9 +623,7 @@ func TestCheckTimestampMaxValue(t *testing.T) {
 	// and that max Timestamp is the largest valid value in Millis.
 	// See issue https://github.com/googleapis/google-cloud-go/issues/1790
 	ctx := context.Background()
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
 			"cf0": {},
@@ -650,9 +669,7 @@ func TestCheckTimestampMaxValue(t *testing.T) {
 
 func TestReadRows(t *testing.T) {
 	ctx := context.Background()
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
 			"cf0": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 1}}},
@@ -700,9 +717,7 @@ func TestReadRows(t *testing.T) {
 
 func TestReadRowsError(t *testing.T) {
 	ctx := context.Background()
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
 			"cf0": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 1}}},
@@ -741,9 +756,7 @@ func TestReadRowsError(t *testing.T) {
 
 func TestReadRowsAfterDeletion(t *testing.T) {
 	ctx := context.Background()
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
 			"cf0": {},
@@ -780,9 +793,7 @@ func TestReadRowsAfterDeletion(t *testing.T) {
 }
 
 func TestReadRowsOrder(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
@@ -934,9 +945,7 @@ func TestReadRowsOrder(t *testing.T) {
 
 func TestReadRowsWithlabelTransformer(t *testing.T) {
 	ctx := context.Background()
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
 			"cf0": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 1}}},
@@ -1005,9 +1014,7 @@ func TestReadRowsWithlabelTransformer(t *testing.T) {
 }
 
 func TestCheckAndMutateRowWithoutPredicate(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 	ctx := context.Background()
 	newTbl := btapb.Table{
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
@@ -1331,9 +1338,7 @@ func compareCellChunks(ci, cj *btpb.ReadRowsResponse_CellChunk) bool {
 }
 
 func TestServer_ReadModifyWriteRow(t *testing.T) {
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 
 	ctx := context.Background()
 	newTbl := btapb.Table{
@@ -1487,9 +1492,7 @@ func TestFilters(t *testing.T) {
 
 	ctx := context.Background()
 
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 
 	tblInfo, err := populateTable(ctx, s)
 	if err != nil {
@@ -1529,9 +1532,7 @@ func TestFilters(t *testing.T) {
 func Test_Mutation_DeleteFromColumn(t *testing.T) {
 	ctx := context.Background()
 
-	s := &server{
-		tables: make(map[string]*table),
-	}
+	s := newTestServer(t)
 
 	tblInfo, err := populateTable(ctx, s)
 	if err != nil {
@@ -1820,7 +1821,7 @@ func TestFilterRowWithUnicodeColumnQualifier(t *testing.T) {
 // See Issue https://github.com/googleapis/google-cloud-go/issues/1399
 func TestFilterRowWithSingleColumnQualifier(t *testing.T) {
 	ctx := context.Background()
-	srv := &server{tables: make(map[string]*table)}
+	srv := newTestServer(t)
 
 	tblReq := &btapb.CreateTableRequest{
 		Parent:  "issue-1399",
@@ -1933,7 +1934,7 @@ func TestValueFilterRowWithAlternationInRegex(t *testing.T) {
 	// Test that regex alternation is applied properly.
 	// See Issue https://github.com/googleapis/google-cloud-go/issues/1499
 	ctx := context.Background()
-	srv := &server{tables: make(map[string]*table)}
+	srv := newTestServer(t)
 
 	tblReq := &btapb.CreateTableRequest{
 		Parent:  "issue-1499",
@@ -2027,7 +2028,7 @@ func TestValueFilterRowWithAlternationInRegex(t *testing.T) {
 }
 
 func TestMutateRowEmptyMutationErrors(t *testing.T) {
-	srv := &server{tables: make(map[string]*table)}
+	srv := newTestServer(t)
 	ctx := context.Background()
 	req := &btpb.MutateRowRequest{
 		TableName: "mytable",
@@ -2053,7 +2054,7 @@ func (x *bigtableTestingMutateRowsServer) Send(m *btpb.MutateRowsResponse) error
 }
 
 func TestMutateRowsEmptyMutationErrors(t *testing.T) {
-	srv := &server{tables: make(map[string]*table)}
+	srv := newTestServer(t)
 	req := &btpb.MutateRowsRequest{
 		TableName: "mytable",
 		Entries: []*btpb.MutateRowsRequest_Entry{

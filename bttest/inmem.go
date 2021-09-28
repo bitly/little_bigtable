@@ -254,7 +254,6 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 		}
 	}
 
-	s.needGC()
 	return &btapb.Table{
 		Name:           req.Name,
 		ColumnFamilies: toColumnFamilies(tbl.families),
@@ -413,9 +412,17 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 	tbl.mu.RUnlock()
 
 	rows := make([]*row, 0, len(rowSet))
+	gcRules := tbl.gcRules()
 	for _, r := range rowSet {
+		// JIT per-row GC
+		if changed := r.gc(gcRules); changed {
+			if len(r.families) > 0 {
+				tbl.rows.ReplaceOrInsert(r)
+			} else {
+				tbl.rows.Delete(r)
+			}
+		}
 		fams := len(r.families)
-
 		if fams != 0 {
 			rows = append(rows, r)
 		}
@@ -826,6 +833,8 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 	if err := applyMutations(tbl, r, req.Mutations, fs); err != nil {
 		return nil, err
 	}
+	// JIT per-row GC
+	r.gc(tbl.gcRules())
 	tbl.rows.ReplaceOrInsert(r)
 	return &btpb.MutateRowResponse{}, nil
 }
@@ -862,6 +871,7 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 			Index:  int64(i),
 			Status: &statpb.Status{Code: code, Message: msg},
 		}
+		r.gc(tbl.gcRules())
 		tbl.rows.ReplaceOrInsert(r)
 	}
 	return stream.Send(res)
@@ -905,6 +915,7 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 	if err := applyMutations(tbl, r, muts, fs); err != nil {
 		return nil, err
 	}
+	r.gc(tbl.gcRules())
 	tbl.rows.ReplaceOrInsert(r)
 	return res, nil
 }
@@ -1093,6 +1104,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 		resultFamily.cellsByColumn(col)           // create the column
 		resultFamily.Cells[col] = []cell{newCell} // overwrite the cells
 	}
+	r.gc(tbl.gcRules())
 	tbl.rows.ReplaceOrInsert(r)
 
 	// Build the response using the result row
@@ -1156,44 +1168,6 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 	return err
 }
 
-// needGC is invoked whenever the server needs gcloop running.
-func (s *server) needGC() {
-	s.mu.Lock()
-	if s.gcc == nil {
-		s.gcc = make(chan int)
-		go s.gcloop(s.gcc)
-	}
-	s.mu.Unlock()
-}
-
-func (s *server) gcloop(done <-chan int) {
-	const (
-		minWait = 500  // ms
-		maxWait = 1500 // ms
-	)
-
-	for {
-		// Wait for a random time interval.
-		d := time.Duration(minWait+rand.Intn(maxWait-minWait)) * time.Millisecond
-		select {
-		case <-time.After(d):
-		case <-done:
-			return // server has been closed
-		}
-
-		// Do a GC pass over all tables.
-		var tables []*table
-		s.mu.Lock()
-		for _, tbl := range s.tables {
-			tables = append(tables, tbl)
-		}
-		s.mu.Unlock()
-		for _, tbl := range tables {
-			tbl.gc()
-		}
-	}
-}
-
 type table struct {
 	mu       sync.RWMutex
 	counter  uint64                   // increment by 1 when a new family is created
@@ -1251,13 +1225,11 @@ func (t *table) mutableRow(key string) *row {
 		return i.(*row)
 	}
 
-	r := newRow(key)
 	// caller will do t.rows.ReplaceOrInsert(r)
-
-	return r
+	return newRow(key)
 }
 
-func (t *table) gc() {
+func (t *table) gcRules() map[string]*btapb.GcRule {
 	// This method doesn't add or remove rows, so we only need a read lock for the table.
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -1270,16 +1242,9 @@ func (t *table) gc() {
 		}
 	}
 	if len(rules) == 0 {
-		return
+		return nil
 	}
-
-	t.rows.Ascend(func(i btree.Item) bool {
-		r := i.(*row)
-		if changed := r.gc(rules); changed {
-			t.rows.ReplaceOrInsert(r)
-		}
-		return true
-	})
+	return rules
 }
 
 type byRowKey []*row

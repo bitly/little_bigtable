@@ -50,10 +50,46 @@ func (r *row) Bytes() ([]byte, error) {
 type ItemIterator = btree.ItemIterator
 type Item = btree.Item
 
-func (db *MysqlRows) Ascend(iterator ItemIterator)                                     {}
-func (db *MysqlRows) AscendGreaterOrEqual(pivot Item, iterator ItemIterator)           {}
-func (db *MysqlRows) AscendLessThan(pivot Item, iterator ItemIterator)                 {}
-func (db *MysqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {}
+func (db *MysqlRows) query(iterator ItemIterator, query string, args ...interface{}) {
+	rows, err := db.db.Query(query, args...)
+	if err == sql.ErrNoRows {
+		return
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.key, &r); err != nil {
+			log.Fatal(err)
+		}
+		iterator(&r)
+	}
+	if err := rows.Err(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (db *MysqlRows) Ascend(iterator ItemIterator) {
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? ORDER BY row_key ASC", db.parent, db.tableId)
+}
+
+func (db *MysqlRows) AscendGreaterOrEqual(pivot Item, iterator ItemIterator) {
+	row := pivot.(*row)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key ASC", db.parent, db.tableId, row.key)
+}
+
+func (db *MysqlRows) AscendLessThan(pivot Item, iterator ItemIterator) {
+	row := pivot.(*row)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, row.key)
+}
+
+func (db *MysqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
+	ge := greaterOrEqual.(*row)
+	lt := lessThan.(*row)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, ge.key, lt.key)
+}
 
 func (db *MysqlRows) DeleteAll() {
 	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId)

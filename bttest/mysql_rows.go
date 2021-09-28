@@ -36,15 +36,13 @@ func (r *row) Scan(src interface{}) error {
 	}
 
 	b := bytes.NewBuffer(src.([]byte))
-	// FIXME: type bttest.family has no exported fields
-	return gob.NewDecoder(b).Decode(r.families)
+	return gob.NewDecoder(b).Decode(&r.families)
 }
 func (r *row) Bytes() ([]byte, error) {
 	if r == nil {
 		return nil, nil
 	}
 	b := new(bytes.Buffer)
-	// FIXME: type bttest.family has no exported fields
 	err := gob.NewEncoder(b).Encode(r.families)
 	return b.Bytes(), err
 }
@@ -78,7 +76,7 @@ func (db *MysqlRows) Get(key Item) Item {
 	if row.families == nil {
 		row.families = make(map[string]*family)
 	}
-	err := db.db.QueryRow("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key).Scan(&row)
+	err := db.db.QueryRow("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key).Scan(row)
 	if err == sql.ErrNoRows {
 		return row
 	}

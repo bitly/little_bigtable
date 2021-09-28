@@ -1637,7 +1637,7 @@ func TestFilterRow(t *testing.T) {
 			"fam": {
 				name: "fam",
 				cells: map[string][]cell{
-					"col": {{ts: 1000, value: []byte("val")}},
+					"col": {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
 		},
@@ -1689,7 +1689,7 @@ func TestFilterRowWithErrors(t *testing.T) {
 			"fam": {
 				name: "fam",
 				cells: map[string][]cell{
-					"col": {{ts: 1000, value: []byte("val")}},
+					"col": {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
 		},
@@ -1759,7 +1759,7 @@ func TestFilterRowWithBinaryColumnQualifier(t *testing.T) {
 			"fam": {
 				name: "fam",
 				cells: map[string][]cell{
-					string(rs): {{ts: 1000, value: []byte("val")}},
+					string(rs): {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
 		},
@@ -1790,7 +1790,7 @@ func TestFilterRowWithUnicodeColumnQualifier(t *testing.T) {
 			"fam": {
 				name: "fam",
 				cells: map[string][]cell{
-					string(rs): {{ts: 1000, value: []byte("val")}},
+					string(rs): {{Ts: 1000, Value: []byte("val")}},
 				},
 			},
 		},
@@ -2083,10 +2083,10 @@ func TestFilterRowCellsPerRowLimitFilterTruthiness(t *testing.T) {
 			"fam": {
 				name: "fam",
 				cells: map[string][]cell{
-					"col1": {{ts: 1000, value: []byte("val2")}},
+					"col1": {{Ts: 1000, Value: []byte("val2")}},
 					"col2": {
-						{ts: 1000, value: []byte("val2")},
-						{ts: 1000, value: []byte("val3")},
+						{Ts: 1000, Value: []byte("val2")},
+						{Ts: 1000, Value: []byte("val3")},
 					},
 				},
 				colNames: []string{"col1", "col2"},

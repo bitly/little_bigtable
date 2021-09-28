@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"os"
@@ -39,6 +40,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestMain(m *testing.M) {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	os.Exit(m.Run())
+}
 
 // newDBFile returns an unused uniqute temp filename
 func newDBFile(t *testing.T) string {

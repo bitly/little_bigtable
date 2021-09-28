@@ -6,6 +6,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/google/btree"
 	"github.com/mattn/go-sqlite3"
@@ -19,6 +20,7 @@ type SqlRows struct {
 	parent  string // Values are of the form `projects/{project}/instances/{instance}`.
 	tableId string // The name by which the new table should be referred to within the parent instance
 
+	mu sync.RWMutex
 	db *sql.DB
 }
 
@@ -55,6 +57,8 @@ type ItemIterator = btree.ItemIterator
 type Item = btree.Item
 
 func (db *SqlRows) query(iterator ItemIterator, query string, args ...interface{}) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 	rows, err := db.db.Query(query, args...)
 	if err == sql.ErrNoRows {
 		return
@@ -96,6 +100,8 @@ func (db *SqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemItera
 }
 
 func (db *SqlRows) DeleteAll() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId)
 	if err != nil {
 		log.Fatal(err)
@@ -104,6 +110,8 @@ func (db *SqlRows) DeleteAll() {
 }
 
 func (db *SqlRows) Delete(item Item) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	row := item.(*row)
 	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key)
 	if err != nil {
@@ -116,6 +124,8 @@ func (db *SqlRows) Get(key Item) Item {
 	if row.families == nil {
 		row.families = make(map[string]*family)
 	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 	err := db.db.QueryRow("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key).Scan(row)
 	if err == sql.ErrNoRows {
 		return row
@@ -128,6 +138,8 @@ func (db *SqlRows) Get(key Item) Item {
 
 func (db *SqlRows) Len() int {
 	var count int
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 	err := db.db.QueryRow("SELECT count(*) FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId).Scan(&count)
 	if err != nil {
 		log.Fatal(err)
@@ -141,13 +153,15 @@ func (db *SqlRows) ReplaceOrInsert(item Item) Item {
 	if err != nil {
 		log.Fatal(err)
 	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	_, err = db.db.Exec("INSERT INTO rows_t (parent, table_id, row_key, families) values (?, ?, ?, ?)", db.parent, db.tableId, row.key, families)
 	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
 		_, err = db.db.Exec("UPDATE rows_t SET families = ? WHERE parent = ? AND table_id = ? AND row_key = ?", families, db.parent, db.tableId, row.key)
 	}
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("row:%s err %s", row.key, err)
 	}
 	return row
 }

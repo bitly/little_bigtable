@@ -34,6 +34,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"math"
@@ -1385,6 +1386,13 @@ func (r *row) String() string {
 }
 
 var gcTypeWarn sync.Once
+
+func init() {
+	gob.Register(&btapb.GcRule_Intersection_{})
+	gob.Register(&btapb.GcRule_Union_{})
+	gob.Register(&btapb.GcRule_MaxAge{})
+	gob.Register(&btapb.GcRule_MaxNumVersions{})
+}
 
 // applyGC applies the given GC rule to the cells.
 func applyGC(cells []cell, rule *btapb.GcRule) ([]cell, bool) {

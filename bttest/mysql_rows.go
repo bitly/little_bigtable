@@ -11,6 +11,7 @@ import (
 )
 
 // MysqlRows is a backend modeled on the github.com/google/btree interface
+// all errors are considered fatal
 type MysqlRows struct {
 	parent  string // Values are of the form `projects/{project}/instances/{instance}`.
 	tableId string // The name by which the new table should be referred to within the parent instance

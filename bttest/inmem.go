@@ -1360,17 +1360,21 @@ func (r *row) gc(rules map[string]*btapb.GcRule) bool {
 	if len(rules) == 0 {
 		return false
 	}
+	var changed bool
 	for _, fam := range r.families {
 		rule, ok := rules[fam.Name]
 		if !ok {
 			continue
 		}
+		var c bool
 		for col, cs := range fam.Cells {
-			r.families[fam.Name].Cells[col] = applyGC(cs, rule)
+			r.families[fam.Name].Cells[col], c = applyGC(cs, rule)
+			if c {
+				changed = true
+			}
 		}
 	}
-	// TODO: return true if GC applied
-	return true
+	return changed
 }
 
 // size returns the total size of all cell values in the row.
@@ -1401,7 +1405,7 @@ func (r *row) String() string {
 var gcTypeWarn sync.Once
 
 // applyGC applies the given GC rule to the cells.
-func applyGC(cells []cell, rule *btapb.GcRule) []cell {
+func applyGC(cells []cell, rule *btapb.GcRule) ([]cell, bool) {
 	switch rule := rule.Rule.(type) {
 	default:
 		// TODO(dsymonds): Support GcRule_Intersection_
@@ -1409,10 +1413,15 @@ func applyGC(cells []cell, rule *btapb.GcRule) []cell {
 			log.Printf("Unsupported GC rule type %T", rule)
 		})
 	case *btapb.GcRule_Union_:
+		var changed bool
 		for _, sub := range rule.Union.Rules {
-			cells = applyGC(cells, sub)
+			var c bool
+			cells, c = applyGC(cells, sub)
+			if c {
+				changed = true
+			}
 		}
-		return cells
+		return cells, changed
 	case *btapb.GcRule_MaxAge:
 		// Timestamps are in microseconds.
 		cutoff := time.Now().UnixNano() / 1e3
@@ -1423,16 +1432,17 @@ func applyGC(cells []cell, rule *btapb.GcRule) []cell {
 		si := sort.Search(len(cells), func(i int) bool { return cells[i].Ts < cutoff })
 		if si < len(cells) {
 			log.Printf("bttest: GC MaxAge(%v) deleted %d cells.", rule.MaxAge, len(cells)-si)
+			return cells[:si], true
 		}
-		return cells[:si]
+		return cells, false
 	case *btapb.GcRule_MaxNumVersions:
 		n := int(rule.MaxNumVersions)
 		if len(cells) > n {
-			cells = cells[:n]
+			return cells[:n], true
 		}
-		return cells
+		return cells, false
 	}
-	return cells
+	return cells, false
 }
 
 type family struct {

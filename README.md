@@ -14,7 +14,6 @@ The Cloud SDK provided `cbtemulator` is in-memory and does not support persistan
 ## Usage
 
 ```
-./little_bigtable --help
 Usage of ./little_bigtable:
   -db-file string
       path to data file (default "little_bigtable.db")

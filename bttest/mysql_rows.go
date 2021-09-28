@@ -1,7 +1,11 @@
 package bttest
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/gob"
+	"fmt"
+	"log"
 
 	"github.com/google/btree"
 )
@@ -22,6 +26,29 @@ func NewMysqlRows(db *sql.DB, parent, tableId string) *MysqlRows {
 	}
 }
 
+func (r *row) Scan(src interface{}) error {
+	switch src := src.(type) {
+	case nil:
+		return nil
+	case []byte:
+	default:
+		return fmt.Errorf("unknown type %T", src)
+	}
+
+	b := bytes.NewBuffer(src.([]byte))
+	// FIXME: type bttest.family has no exported fields
+	return gob.NewDecoder(b).Decode(r.families)
+}
+func (r *row) Bytes() ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	b := new(bytes.Buffer)
+	// FIXME: type bttest.family has no exported fields
+	err := gob.NewEncoder(b).Encode(r.families)
+	return b.Bytes(), err
+}
+
 type ItemIterator = btree.ItemIterator
 type Item = btree.Item
 
@@ -30,12 +57,55 @@ func (db *MysqlRows) AscendGreaterOrEqual(pivot Item, iterator ItemIterator)    
 func (db *MysqlRows) AscendLessThan(pivot Item, iterator ItemIterator)                 {}
 func (db *MysqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {}
 
-func (db *MysqlRows) DeleteAll() {}
+func (db *MysqlRows) DeleteAll() {
+	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-func (db *MysqlRows) Delete(item Item) Item { return nil }
+}
 
-func (db *MysqlRows) Get(key Item) Item { return &row{} }
+func (db *MysqlRows) Delete(item Item) {
+	row := item.(*row)
+	_, err := db.db.Exec("DELETE FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
 
-func (db *MysqlRows) Len() int { return 0 }
+func (db *MysqlRows) Get(key Item) Item {
+	row := key.(*row)
+	if row.families == nil {
+		row.families = make(map[string]*family)
+	}
+	err := db.db.QueryRow("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key).Scan(&row)
+	if err == sql.ErrNoRows {
+		return row
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	return row
+}
 
-func (db *MysqlRows) ReplaceOrInsert(item Item) Item { return &row{} }
+func (db *MysqlRows) Len() int {
+	var count int
+	err := db.db.QueryRow("SELECT count(*) FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId).Scan(&count)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return count
+}
+
+func (db *MysqlRows) ReplaceOrInsert(item Item) Item {
+	row := item.(*row)
+	families, err := row.Bytes()
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = db.db.Exec("INSERT INTO rows_t (parent, table_id, row_key, families) values (?, ?, ?, ?) ON DUPLICATE KEY UPDATE families = ?", db.parent, db.tableId, row.key, families, families)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return row
+}

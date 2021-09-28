@@ -4,6 +4,7 @@ little_bigtable launches the mysql backed Bigtable emulator on the given address
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -26,11 +27,13 @@ const (
 )
 
 func main() {
+	ctx := context.Background()
 	grpc.EnableTracing = false
 	flag.Parse()
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	cfg, err := mysql.ParseDSN(*dsn)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("error connecting to database %#v", err)
 	}
 	if cfg.DBName == "" {
 		log.Fatal("--mysql-dsn must include database name")
@@ -50,23 +53,22 @@ func main() {
 		if e, ok := err.(*mysql.MySQLError); ok {
 			switch e.Number {
 			case 1049:
-				dbName := cfg.DBName
-				cfg.DBName = ""
-				tempDSN := cfg.FormatDSN()
-				db2, err := sql.Open("mysql", tempDSN)
+				// Error 1049: Unknown database '...'
+				// this is fatal so we need to reconnect without the database name in DSN
+				err = bttest.CreateMysqlDatabase(ctx, cfg)
 				if err != nil {
 					log.Fatal(err)
 				}
-				// create table
-				log.Printf("Creating database %s", dbName)
-				_, err = db2.Exec(fmt.Sprintf("create database %s", dbName))
-				if err != nil {
-					log.Fatal(err)
-				}
-				db2.Close()
+				err = db.Ping()
 			}
 		}
-		log.Printf("warning: %s", err)
+		if err != nil {
+			log.Printf("warning: %s", err)
+		}
+	}
+	err = bttest.CreateTables(ctx, db)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	opts := []grpc.ServerOption{
@@ -78,6 +80,6 @@ func main() {
 		log.Fatalf("failed to start emulator: %v", err)
 	}
 
-	log.Printf("\"little\" Bigtable emulator running on %s", srv.Addr)
+	log.Printf("\"little\" Bigtable emulator running. Connect with environment variable BIGTABLE_EMULATOR_HOST=%q", srv.Addr)
 	select {}
 }

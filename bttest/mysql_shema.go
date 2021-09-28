@@ -60,5 +60,25 @@ func CreateTables(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+
+	ok, err = mysqlTableExists(ctx, db, "tables_t")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		log.Printf("creating table tables_t")
+		query := "CREATE TABLE tables_t ( \n" +
+			"`parent` varchar(128) NOT NULL,\n" +
+			"`table_id` varchar(128) NOT NULL,\n" +
+			"`metadata` blob NOT NULL,\n" +
+			"PRIMARY KEY  (`parent`, `table_id`)\n" +
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin"
+		// log.Print(query)
+		_, err := db.ExecContext(ctx, query)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

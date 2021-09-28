@@ -84,11 +84,12 @@ type Server struct {
 // It is a separate and unexported type so the API won't be cluttered with
 // methods that are only relevant to the fake's implementation.
 type server struct {
-	mu        sync.Mutex
-	tables    map[string]*table          // keyed by fully qualified name
-	instances map[string]*btapb.Instance // keyed by fully qualified name
-	gcc       chan int                   // set when gcloop starts, closed when server shuts down
-	db        *sql.DB
+	mu           sync.Mutex
+	tables       map[string]*table          // keyed by fully qualified name
+	instances    map[string]*btapb.Instance // keyed by fully qualified name
+	gcc          chan int                   // set when gcloop starts, closed when server shuts down
+	db           *sql.DB
+	tableBackend *MysqlTables
 
 	// Any unimplemented methods will cause a panic.
 	btapb.BigtableTableAdminServer
@@ -110,12 +111,13 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 		l:    l,
 		srv:  grpc.NewServer(opt...),
 		s: &server{
-			tables:    make(map[string]*table),
-			instances: make(map[string]*btapb.Instance),
-			db:        db,
+			tables:       make(map[string]*table),
+			instances:    make(map[string]*btapb.Instance),
+			db:           db,
+			tableBackend: NewMysqlTables(db),
 		},
 	}
-	// TODO: s.LoadTables()
+	s.s.LoadTables()
 	btapb.RegisterBigtableInstanceAdminServer(s.srv, s.s)
 	btapb.RegisterBigtableTableAdminServer(s.srv, s.s)
 	btpb.RegisterBigtableServer(s.srv, s.s)
@@ -137,6 +139,13 @@ func (s *Server) Close() {
 	s.l.Close()
 }
 
+func (s *server) LoadTables() {
+	tables := s.tableBackend.GetAll()
+	for _, t := range tables {
+		s.tables[t.parent+"/tables/"+t.tableId] = t
+	}
+}
+
 func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest) (*btapb.Table, error) {
 	tbl := req.Parent + "/tables/" + req.TableId
 
@@ -146,6 +155,7 @@ func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest)
 		return nil, status.Errorf(codes.AlreadyExists, "table %q already exists", tbl)
 	}
 	s.tables[tbl] = newTable(req, s.db)
+	s.tableBackend.Save(s.tables[tbl])
 	s.mu.Unlock()
 
 	ct := &btapb.Table{
@@ -197,10 +207,12 @@ func (s *server) GetTable(ctx context.Context, req *btapb.GetTableRequest) (*bta
 func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.tables[req.Name]; !ok {
+	if tbl, ok := s.tables[req.Name]; !ok {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
+	} else {
+		s.tableBackend.Delete(tbl)
+		delete(s.tables, req.Name)
 	}
-	delete(s.tables, req.Name)
 	return &emptypb.Empty{}, nil
 }
 
@@ -221,9 +233,9 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 				return nil, status.Errorf(codes.AlreadyExists, "family %q already exists", mod.Id)
 			}
 			newcf := &columnFamily{
-				name:   req.Name + "/columnFamilies/" + mod.Id,
-				order:  tbl.counter,
-				gcRule: create.GcRule,
+				Name:   req.Name + "/columnFamilies/" + mod.Id,
+				Order:  tbl.counter,
+				GCRule: create.GcRule,
 			}
 			tbl.counter++
 			tbl.families[mod.Id] = newcf
@@ -245,14 +257,15 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 				return nil, fmt.Errorf("no such family %q", mod.Id)
 			}
 			newcf := &columnFamily{
-				name:   req.Name + "/columnFamilies/" + mod.Id,
-				gcRule: modify.GcRule,
+				Name:   req.Name + "/columnFamilies/" + mod.Id,
+				GCRule: modify.GcRule,
 			}
 			// assume that we ALWAYS want to replace by the new setting
 			// we may need partial update through
 			tbl.families[mod.Id] = newcf
 		}
 	}
+	s.tableBackend.Save(tbl)
 
 	return &btapb.Table{
 		Name:           req.Name,
@@ -944,7 +957,7 @@ func applyMutations(tbl *table, r *row, muts []*btpb.Mutation, fs map[string]*co
 			col := string(set.ColumnQualifier)
 
 			newCell := cell{Ts: ts, Value: set.Value}
-			f := r.getOrCreateFamily(fam, fs[fam].order)
+			f := r.getOrCreateFamily(fam, fs[fam].Order)
 			f.Cells[col] = appendOrReplaceCell(f.cellsByColumn(col), newCell)
 		case *btpb.Mutation_DeleteFromColumn_:
 			del := mut.DeleteFromColumn
@@ -1061,7 +1074,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 		fam := rule.FamilyName
 		col := string(rule.ColumnQualifier)
 		isEmpty := false
-		f := r.getOrCreateFamily(fam, fs[fam].order)
+		f := r.getOrCreateFamily(fam, fs[fam].Order)
 		cs := f.Cells[col]
 		isEmpty = len(cs) == 0
 
@@ -1100,7 +1113,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 		f.Cells[col] = appendOrReplaceCell(f.cellsByColumn(col), newCell)
 
 		// Store a copy for the result row
-		resultFamily := resultRow.getOrCreateFamily(fam, fs[fam].order)
+		resultFamily := resultRow.getOrCreateFamily(fam, fs[fam].Order)
 		resultFamily.cellsByColumn(col)           // create the column
 		resultFamily.Cells[col] = []cell{newCell} // overwrite the cells
 	}
@@ -1169,6 +1182,8 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 }
 
 type table struct {
+	parent   string
+	tableId  string
 	mu       sync.RWMutex
 	counter  uint64                   // increment by 1 when a new family is created
 	families map[string]*columnFamily // keyed by plain family name
@@ -1183,14 +1198,16 @@ func newTable(ctr *btapb.CreateTableRequest, db *sql.DB) *table {
 	if ctr.Table != nil {
 		for id, cf := range ctr.Table.ColumnFamilies {
 			fams[id] = &columnFamily{
-				name:   ctr.Parent + "/columnFamilies/" + id,
-				order:  c,
-				gcRule: cf.GcRule,
+				Name:   ctr.Parent + "/columnFamilies/" + id,
+				Order:  c,
+				GCRule: cf.GcRule,
 			}
 			c++
 		}
 	}
 	return &table{
+		parent:   ctr.Parent,
+		tableId:  ctr.TableId,
 		families: fams,
 		counter:  c,
 		rows:     NewMysqlRows(db, ctr.Parent, ctr.TableId),
@@ -1237,8 +1254,8 @@ func (t *table) gcRules() map[string]*btapb.GcRule {
 	// Gather GC rules we'll apply.
 	rules := make(map[string]*btapb.GcRule) // keyed by "fam"
 	for fam, cf := range t.families {
-		if cf.gcRule != nil {
-			rules[fam] = cf.gcRule
+		if cf.GCRule != nil {
+			rules[fam] = cf.GCRule
 		}
 	}
 	if len(rules) == 0 {
@@ -1446,14 +1463,14 @@ func (b byDescTS) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
 func (b byDescTS) Less(i, j int) bool { return b[i].Ts > b[j].Ts }
 
 type columnFamily struct {
-	name   string
-	order  uint64 // Creation order of column family
-	gcRule *btapb.GcRule
+	Name   string
+	Order  uint64 // Creation order of column family
+	GCRule *btapb.GcRule
 }
 
 func (c *columnFamily) proto() *btapb.ColumnFamily {
 	return &btapb.ColumnFamily{
-		GcRule: c.gcRule,
+		GcRule: c.GCRule,
 	}
 }
 

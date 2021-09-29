@@ -339,7 +339,7 @@ func SampleRowKeysConcurrentTest(t *testing.T, antagonist AntagonistFunction) {
 		}
 	}
 
-	attempts := 500
+	attempts := 100
 	finished := make(chan bool)
 	go func() {
 		populate()
@@ -355,7 +355,7 @@ func SampleRowKeysConcurrentTest(t *testing.T, antagonist AntagonistFunction) {
 	for i := 0; i < 2; i++ {
 		select {
 		case <-finished:
-		case <-time.After(2 * time.Second):
+		case <-time.After(4 * time.Second):
 			t.Fatalf("Timeout waiting for task %d\n", i)
 		}
 	}

@@ -863,8 +863,8 @@ func TestReadRowsOrder(t *testing.T) {
 	if len(mock.responses) == 0 {
 		t.Fatal("Response count: got 0, want > 0")
 	}
-	if len(mock.responses[0].Chunks) != 27 {
-		t.Fatalf("Chunk count: got %d, want 27", len(mock.responses[0].Chunks))
+	if len(mock.responses[0].Chunks) != 21 {
+		t.Fatalf("Chunk count: got %d, want 21", len(mock.responses[0].Chunks))
 	}
 	testOrder := func(ms *MockReadRowsServer) {
 		var prevFam, prevCol string
@@ -914,8 +914,8 @@ func TestReadRowsOrder(t *testing.T) {
 	if len(mock.responses) == 0 {
 		t.Fatal("Response count: got 0, want > 0")
 	}
-	if len(mock.responses[0].Chunks) != 18 {
-		t.Fatalf("Chunk count: got %d, want 18", len(mock.responses[0].Chunks))
+	if len(mock.responses[0].Chunks) != 16 {
+		t.Fatalf("Chunk count: got %d, want 16", len(mock.responses[0].Chunks))
 	}
 	testOrder(mock)
 
@@ -947,8 +947,8 @@ func TestReadRowsOrder(t *testing.T) {
 	if len(mock.responses) == 0 {
 		t.Fatal("Response count: got 0, want > 0")
 	}
-	if len(mock.responses[0].Chunks) != 30 {
-		t.Fatalf("Chunk count: got %d, want 30", len(mock.responses[0].Chunks))
+	if len(mock.responses[0].Chunks) != 24 {
+		t.Fatalf("Chunk count: got %d, want 24", len(mock.responses[0].Chunks))
 	}
 	testOrder(mock)
 }
@@ -1080,7 +1080,7 @@ func TestCheckAndMutateRowWithoutPredicate(t *testing.T) {
 
 func TestCheckAndMutateRowWithPredicate(t *testing.T) {
 	ctx := context.Background()
-	srv := &server{tables: make(map[string]*table)}
+	srv := newTestServer(t)
 
 	tblReq := &btapb.CreateTableRequest{
 		Parent:  "issue-1435",

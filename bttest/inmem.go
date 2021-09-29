@@ -212,6 +212,7 @@ func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest)
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	} else {
 		s.tableBackend.Delete(tbl)
+		tbl.rows.DeleteAll()
 		delete(s.tables, req.Name)
 	}
 	return &emptypb.Empty{}, nil
@@ -420,10 +421,10 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 		// Read all rows
 		tbl.rows.Ascend(addRow)
 	}
+	gcRules := tbl.gcRules()
 	tbl.mu.RUnlock()
 
 	rows := make([]*row, 0, len(rowSet))
-	gcRules := tbl.gcRules()
 	for _, r := range rowSet {
 		// JIT per-row GC
 		changed := r.gc(gcRules)

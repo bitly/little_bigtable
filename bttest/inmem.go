@@ -245,14 +245,7 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 				return nil, fmt.Errorf("can't delete unknown family %q", mod.Id)
 			}
 			delete(tbl.families, mod.Id)
-
-			// Purge all data for this column family
-			tbl.rows.Ascend(func(i btree.Item) bool {
-				r := i.(*row)
-				delete(r.families, mod.Id)
-				tbl.rows.ReplaceOrInsert(r)
-				return true
-			})
+			// lazy GC removes the column family
 		} else if modify := mod.GetUpdate(); modify != nil {
 			if _, ok := tbl.families[mod.Id]; !ok {
 				return nil, fmt.Errorf("no such family %q", mod.Id)
@@ -376,6 +369,10 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 	// Output is a stream of sorted, de-duped rows.
 	tbl.mu.RLock()
 	rowSet := make(map[string]*row)
+	families := make(map[string]bool)
+	for f, _ := range tbl.families {
+		families[f] = true
+	}
 
 	addRow := func(i btree.Item) bool {
 		r := i.(*row)
@@ -429,7 +426,15 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 	gcRules := tbl.gcRules()
 	for _, r := range rowSet {
 		// JIT per-row GC
-		if changed := r.gc(gcRules); changed {
+		changed := r.gc(gcRules)
+		// JIT family deletion
+		for f, _ := range r.families {
+			if !families[f] {
+				delete(r.families, f)
+				changed = true
+			}
+		}
+		if changed {
 			if len(r.families) > 0 {
 				tbl.rows.ReplaceOrInsert(r)
 			} else {
@@ -849,6 +854,13 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 	}
 	// JIT per-row GC
 	r.gc(tbl.gcRules())
+	// JIT family deletion
+	for f, _ := range r.families {
+		if _, ok := tbl.families[f]; !ok {
+			delete(r.families, f)
+		}
+	}
+
 	tbl.rows.ReplaceOrInsert(r)
 	return &btpb.MutateRowResponse{}, nil
 }
@@ -872,12 +884,12 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 	}
 	res := &btpb.MutateRowsResponse{Entries: make([]*btpb.MutateRowsResponse_Entry, len(req.Entries))}
 
-	fs := tbl.columnFamilies()
+	cfs := tbl.columnFamilies()
 
 	for i, entry := range req.Entries {
 		r := tbl.mutableRow(string(entry.RowKey))
 		code, msg := int32(codes.OK), ""
-		if err := applyMutations(tbl, r, entry.Mutations, fs); err != nil {
+		if err := applyMutations(tbl, r, entry.Mutations, cfs); err != nil {
 			code = int32(codes.Internal)
 			msg = err.Error()
 		}
@@ -886,6 +898,12 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 			Status: &statpb.Status{Code: code, Message: msg},
 		}
 		r.gc(tbl.gcRules())
+		// JIT family deletion; could be skipped if mutableRow doesn't return an existing row
+		for f, _ := range r.families {
+			if _, ok := cfs[f]; !ok {
+				delete(r.families, f)
+			}
+		}
 		tbl.rows.ReplaceOrInsert(r)
 	}
 	return stream.Send(res)
@@ -900,7 +918,7 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 	}
 	res := &btpb.CheckAndMutateRowResponse{}
 
-	fs := tbl.columnFamilies()
+	cfs := tbl.columnFamilies()
 
 	r := tbl.mutableRow(string(req.RowKey))
 
@@ -926,10 +944,16 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 		muts = req.TrueMutations
 	}
 
-	if err := applyMutations(tbl, r, muts, fs); err != nil {
+	if err := applyMutations(tbl, r, muts, cfs); err != nil {
 		return nil, err
 	}
 	r.gc(tbl.gcRules())
+	// JIT family deletion; could be skipped if mutableRow doesn't return an existing row
+	for f, _ := range r.families {
+		if _, ok := cfs[f]; !ok {
+			delete(r.families, f)
+		}
+	}
 	tbl.rows.ReplaceOrInsert(r)
 	return res, nil
 }
@@ -1059,7 +1083,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
 	}
 
-	fs := tbl.columnFamilies()
+	cfs := tbl.columnFamilies()
 
 	rowKey := string(req.RowKey)
 	r := tbl.mutableRow(rowKey)
@@ -1068,14 +1092,14 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 	// Assume all mutations apply to the most recent version of the cell.
 	// TODO(dsymonds): Verify this assumption and document it in the proto.
 	for _, rule := range req.Rules {
-		if _, ok := fs[rule.FamilyName]; !ok {
+		if _, ok := cfs[rule.FamilyName]; !ok {
 			return nil, fmt.Errorf("unknown family %q", rule.FamilyName)
 		}
 
 		fam := rule.FamilyName
 		col := string(rule.ColumnQualifier)
 		isEmpty := false
-		f := r.getOrCreateFamily(fam, fs[fam].Order)
+		f := r.getOrCreateFamily(fam, cfs[fam].Order)
 		cs := f.Cells[col]
 		isEmpty = len(cs) == 0
 
@@ -1114,11 +1138,17 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 		f.Cells[col] = appendOrReplaceCell(f.cellsByColumn(col), newCell)
 
 		// Store a copy for the result row
-		resultFamily := resultRow.getOrCreateFamily(fam, fs[fam].Order)
+		resultFamily := resultRow.getOrCreateFamily(fam, cfs[fam].Order)
 		resultFamily.cellsByColumn(col)           // create the column
 		resultFamily.Cells[col] = []cell{newCell} // overwrite the cells
 	}
 	r.gc(tbl.gcRules())
+	// JIT family deletion; could be skipped if mutableRow doesn't return an existing row
+	for f, _ := range r.families {
+		if _, ok := cfs[f]; !ok {
+			delete(r.families, f)
+		}
+	}
 	tbl.rows.ReplaceOrInsert(r)
 
 	// Build the response using the result row
@@ -1163,9 +1193,11 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 	var offset int64
 	var err error
 	i := 0
+
+	len := tbl.rows.Len()
 	tbl.rows.Ascend(func(it btree.Item) bool {
 		row := it.(*row)
-		if i == tbl.rows.Len()-1 || rand.Int31n(100) == 0 {
+		if rand.Int31n(100) == 0 || i == len-1 {
 			resp := &btpb.SampleRowKeysResponse{
 				RowKey:      []byte(row.key),
 				OffsetBytes: offset,

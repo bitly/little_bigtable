@@ -69,6 +69,7 @@ func newTestServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(1)
 	CreateTables(context.Background(), db)
 
 	s := &server{
@@ -284,6 +285,7 @@ func TestSampleRowKeys(t *testing.T) {
 			t.Fatalf("Populating table: %v", err)
 		}
 	}
+	t.Logf("before SampleRowKeys")
 
 	mock := &MockSampleRowKeysServer{}
 	if err := s.SampleRowKeys(&btpb.SampleRowKeysRequest{TableName: tbl.Name}, mock); err != nil {

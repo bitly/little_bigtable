@@ -39,8 +39,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed creating sqlite3 connection %v", err)
 	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(1)
 
 	err = bttest.CreateTables(ctx, db)
 	if err != nil {

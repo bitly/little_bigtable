@@ -57,8 +57,8 @@ type ItemIterator = btree.ItemIterator
 type Item = btree.Item
 
 func (db *SqlRows) query(iterator ItemIterator, query string, args ...interface{}) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	// db.mu.RLock()
+	// defer db.mu.RUnlock()
 	rows, err := db.db.Query(query, args...)
 	if err == sql.ErrNoRows {
 		return
@@ -72,7 +72,9 @@ func (db *SqlRows) query(iterator ItemIterator, query string, args ...interface{
 		if err := rows.Scan(&r.key, &r); err != nil {
 			log.Fatal(err)
 		}
-		iterator(&r)
+		if !iterator(&r) {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		log.Fatal(err)
@@ -124,8 +126,8 @@ func (db *SqlRows) Get(key Item) Item {
 	if row.families == nil {
 		row.families = make(map[string]*family)
 	}
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	// db.mu.RLock()
+	// defer db.mu.RUnlock()
 	err := db.db.QueryRow("SELECT families FROM rows_t WHERE parent = ? and table_id = ? and row_key = ?", db.parent, db.tableId, row.key).Scan(row)
 	if err == sql.ErrNoRows {
 		return row
@@ -138,8 +140,8 @@ func (db *SqlRows) Get(key Item) Item {
 
 func (db *SqlRows) Len() int {
 	var count int
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	// db.mu.RLock()
+	// defer db.mu.RUnlock()
 	err := db.db.QueryRow("SELECT count(*) FROM rows_t WHERE parent = ? and table_id = ?", db.parent, db.tableId).Scan(&count)
 	if err != nil {
 		log.Fatal(err)

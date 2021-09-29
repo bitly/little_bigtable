@@ -461,7 +461,9 @@ func TestModifyColumnFamilies(t *testing.T) {
 		}
 	}
 
-	readRows(27, 9, 3)
+	// 	readRows(27, 9, 3)
+	// but because our GC is lazy and exact we expect 21; cf0 has a verison limit
+	readRows(21, 9, 3)
 
 	// Now drop the middle column.
 	if _, err := s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{
@@ -474,7 +476,7 @@ func TestModifyColumnFamilies(t *testing.T) {
 		t.Fatalf("ModifyColumnFamilies error: %v", err)
 	}
 
-	readRows(18, 6, 2)
+	readRows(12, 6, 2)
 
 	// adding the column back should not re-create the data.
 	if _, err := s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{
@@ -487,7 +489,7 @@ func TestModifyColumnFamilies(t *testing.T) {
 		t.Fatalf("ModifyColumnFamilies error: %v", err)
 	}
 
-	readRows(18, 6, 2)
+	readRows(12, 6, 2)
 }
 
 func TestDropRowRange(t *testing.T) {

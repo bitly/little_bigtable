@@ -9,27 +9,34 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
 
 	"github.com/bitly/little_bigtable/bttest"
 	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"
 )
 
-var (
-	host   = flag.String("host", "localhost", "the address to bind to on the local machine")
-	port   = flag.Int("port", 9000, "the port number to bind to on the local machine")
-	dbFile = flag.String("db-file", "little_bigtable.db", "path to data file")
-)
-
 const (
 	maxMsgSize = 256 * 1024 * 1024 // 256 MiB
+	version    = "0.1.0"
 )
 
 func main() {
+	host := flag.String("host", "localhost", "the address to bind to on the local machine")
+	port := flag.Int("port", 9000, "the port number to bind to on the local machine")
+	dbFile := flag.String("db-file", "little_bigtable.db", "path to data file")
+	showVersion := flag.Bool("version", false, "show version")
+
 	ctx := context.Background()
 	grpc.EnableTracing = false
 	flag.Parse()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
+	if *showVersion {
+		fmt.Printf("little_bigtable v%s (built w/%s)", version, runtime.Version())
+		os.Exit(0)
+	}
 
 	if *dbFile == "" {
 		log.Fatal("missing --db-file")

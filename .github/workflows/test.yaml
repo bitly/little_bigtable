@@ -15,7 +15,6 @@ jobs:
           - "golang:1.17-bullseye"
         goarch:
           - "amd64"
-          - "386"
 
     container: "${{matrix.imgtag}}"
     env:

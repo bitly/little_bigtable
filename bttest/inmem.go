@@ -857,7 +857,7 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 	r.gc(tbl.gcRules())
 	// JIT family deletion
 	for f, _ := range r.families {
-		if _, ok := tbl.families[f]; !ok {
+		if _, ok := fs[f]; !ok {
 			delete(r.families, f)
 		}
 	}

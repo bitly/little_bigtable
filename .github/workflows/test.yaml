@@ -30,6 +30,7 @@ jobs:
 
       - name: build
         run: |
+          apt-get install build-essential
           cd $SRCDIR
           make all
       - name: test

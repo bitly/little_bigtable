@@ -23,6 +23,15 @@ Usage of ./little_bigtable:
       the address to bind to on the local machine (default "localhost")
   -port int
       the port number to bind to on the local machine (default 9000)
+  -version
+      show version
+```
+
+In the environment for your application, set the `BIGTABLE_EMULATOR_HOST` environment variable to the host and port where `little_bigtable` is running. This environment variable is automatically detected by the Bigtable SDK or the `cbt` CLI. For example:
+
+```bash
+$ export BIGTABLE_EMULATOR_HOST="127.0.0.1:9000"
+$ ./run_my_app
 ```
 
 ## Limitations

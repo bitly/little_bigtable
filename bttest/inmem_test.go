@@ -352,10 +352,11 @@ func SampleRowKeysConcurrentTest(t *testing.T, antagonist AntagonistFunction) {
 		finished <- true
 	}()
 	go antagonist(s, attempts, tbl.Name, finished)
+	timeout := time.After(10 * time.Second)
 	for i := 0; i < 2; i++ {
 		select {
 		case <-finished:
-		case <-time.After(4 * time.Second):
+		case <-timeout:
 			t.Fatalf("Timeout waiting for task %d\n", i)
 		}
 	}

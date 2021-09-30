@@ -31,11 +31,15 @@ func (t *table) Scan(src interface{}) error {
 	}
 
 	b := bytes.NewBuffer(src.([]byte))
-	return gob.NewDecoder(b).Decode(&t.families)
+	err := gob.NewDecoder(b).Decode(&t.families)
 
-	// TODO: set to max
 	t.counter = uint64(len(t.families))
-	return nil
+	for _, f := range t.families {
+		if f.Order > t.counter {
+			t.counter = f.Order
+		}
+	}
+	return err
 }
 
 func (t *table) Bytes() ([]byte, error) {

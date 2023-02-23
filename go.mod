@@ -9,7 +9,6 @@ require (
 	github.com/google/go-cmp v0.5.6
 	github.com/mattn/go-sqlite3 v1.14.8
 	github.com/stretchr/testify v1.7.0
-	google.golang.org/api v0.57.0
 	google.golang.org/genproto v0.0.0-20210927142257-433400c27d05
 	google.golang.org/grpc v1.41.0
 	rsc.io/binaryregexp v0.2.0
@@ -24,8 +23,9 @@ require (
 	go.opencensus.io v0.23.0 // indirect
 	golang.org/x/net v0.0.0-20210503060351-7fd8e65b6420 // indirect
 	golang.org/x/oauth2 v0.0.0-20210819190943-2bc19b11175f // indirect
-	golang.org/x/sys v0.0.0-20210908233432-aa78b53d3365 // indirect
-	golang.org/x/text v0.3.6 // indirect
+	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
+	golang.org/x/text v0.3.8 // indirect
+	google.golang.org/api v0.57.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c // indirect

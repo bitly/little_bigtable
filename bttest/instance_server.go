@@ -96,6 +96,10 @@ func (s *server) UpdateCluster(ctx context.Context, req *btapb.Cluster) (*longru
 	return nil, errUnimplemented
 }
 
+func (s *server) PartialUpdateCluster(ctx context.Context, req *btapb.PartialUpdateClusterRequest) (*longrunning.Operation, error) {
+	return nil, errUnimplemented
+}
+
 func (s *server) DeleteCluster(ctx context.Context, req *btapb.DeleteClusterRequest) (*empty.Empty, error) {
 	return nil, errUnimplemented
 }
@@ -129,5 +133,9 @@ func (s *server) SetIamPolicy(ctx context.Context, req *iampb.SetIamPolicyReques
 }
 
 func (s *server) TestIamPermissions(ctx context.Context, req *iampb.TestIamPermissionsRequest) (*iampb.TestIamPermissionsResponse, error) {
+	return nil, errUnimplemented
+}
+
+func (s *server) ListHotTablets(ctx context.Context, req *btapb.ListHotTabletsRequest) (*btapb.ListHotTabletsResponse, error) {
 	return nil, errUnimplemented
 }

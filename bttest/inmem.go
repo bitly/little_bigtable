@@ -19,6 +19,7 @@ Package bttest contains test helpers for working with the bigtable package.
 
 To use a Server, create it, and then connect to it with no security:
 (The project/instance values are ignored.)
+
 	srv, err := bttest.NewServer("localhost:0")
 	...
 	conn, err := grpc.Dial(srv.Addr, grpc.WithInsecure())
@@ -46,6 +47,7 @@ import (
 	"sync"
 	"time"
 
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	emptypb "github.com/golang/protobuf/ptypes/empty"
 	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/google/btree"
@@ -205,6 +207,10 @@ func (s *server) GetTable(ctx context.Context, req *btapb.GetTableRequest) (*bta
 	}, nil
 }
 
+func (s *server) UpdateTable(context.Context, *btapb.UpdateTableRequest) (*longrunningpb.Operation, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support table updates")
+}
+
 func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,6 +222,10 @@ func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest)
 		delete(s.tables, req.Name)
 	}
 	return &emptypb.Empty{}, nil
+}
+
+func (s *server) UndeleteTable(context.Context, *btapb.UndeleteTableRequest) (*longrunningpb.Operation, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support table undeletes")
 }
 
 func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColumnFamiliesRequest) (*btapb.Table, error) {
@@ -352,6 +362,30 @@ func (s *server) ListSnapshots(context.Context, *btapb.ListSnapshotsRequest) (*b
 
 func (s *server) DeleteSnapshot(context.Context, *btapb.DeleteSnapshotRequest) (*emptypb.Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support snapshots")
+}
+
+func (s *server) CreateBackup(context.Context, *btapb.CreateBackupRequest) (*longrunning.Operation, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
+}
+
+func (s *server) GetBackup(context.Context, *btapb.GetBackupRequest) (*btapb.Backup, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
+}
+
+func (s *server) UpdateBackup(context.Context, *btapb.UpdateBackupRequest) (*btapb.Backup, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
+}
+
+func (s *server) DeleteBackup(context.Context, *btapb.DeleteBackupRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
+}
+
+func (s *server) ListBackups(context.Context, *btapb.ListBackupsRequest) (*btapb.ListBackupsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support backups")
+}
+
+func (s *server) RestoreTable(context.Context, *btapb.RestoreTableRequest) (*longrunningpb.Operation, error) {
+	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support restores")
 }
 
 func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {

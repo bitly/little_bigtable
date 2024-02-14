@@ -173,6 +173,104 @@ func TestConcurrentMutationsReadModifyAndGC(t *testing.T) {
 	}
 }
 
+func TestConcurrentMutations(t *testing.T) {
+	// 50 concurrent mutations of different cells on the same row
+	// expect all 50 values after
+	s := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := s.CreateTable(
+		ctx,
+		&btapb.CreateTableRequest{Parent: "c", TableId: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	const name = `c/tables/t`
+	req := &btapb.ModifyColumnFamiliesRequest{
+		Name: name,
+		Modifications: []*btapb.ModifyColumnFamiliesRequest_Modification{{
+			Id:  "cf",
+			Mod: &btapb.ModifyColumnFamiliesRequest_Modification_Create{Create: &btapb.ColumnFamily{}},
+		}},
+	}
+	_, err := s.ModifyColumnFamilies(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	ms := func(i int) []*btpb.Mutation {
+		return []*btpb.Mutation{{
+			Mutation: &btpb.Mutation_SetCell_{SetCell: &btpb.Mutation_SetCell{
+				FamilyName:      "cf",
+				ColumnQualifier: []byte(fmt.Sprintf("%d", i)),
+				Value:           []byte(fmt.Sprintf("%d", i)),
+				TimestampMicros: 1000,
+			}},
+		}}
+	}
+
+	rowKey := []byte("rowkey")
+	start := make(chan bool)
+	for i := 0; i < 50; i++ {
+		i := i
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for ctx.Err() == nil {
+				req := &btpb.MutateRowRequest{
+					TableName: name,
+					RowKey:    rowKey,
+					Mutations: ms(i),
+				}
+				if _, err := s.MutateRow(ctx, req); err != nil {
+					panic(err) // can't use t.Fatal in goroutine
+				}
+			}
+		}(i)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	close(start)
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Error("Concurrent mutations haven't completed after 1s")
+	}
+
+	// verify
+	mock := &MockReadRowsServer{}
+	rreq := &btpb.ReadRowsRequest{TableName: name}
+	if err = s.ReadRows(rreq, mock); err != nil {
+		t.Fatalf("ReadRows error: %v", err)
+	}
+	if len(mock.responses) != 1 {
+		t.Fatal("Response count: got 0, want 1")
+	}
+	if len(mock.responses[0].Chunks) != 50 {
+		t.Errorf("Chunk count: got %d, want 50", len(mock.responses[0].Chunks))
+	}
+
+	var gotChunks []*btpb.ReadRowsResponse_CellChunk
+	for _, res := range mock.responses {
+		gotChunks = append(gotChunks, res.Chunks...)
+	}
+	var seen []string
+	for i, c := range gotChunks {
+		if !bytes.Equal(c.RowKey, rowKey) {
+			t.Fatalf("expected row %q got %q", c.RowKey, rowKey)
+		}
+		if !bytes.Equal(c.Qualifier.Value, c.Value) {
+			t.Fatalf("[%d] expected equal got %q %q", i, c.Qualifier.Value, c.Value)
+		}
+		seen = append(seen, string(c.Qualifier.Value))
+	}
+	sort.Strings(seen)
+	t.Logf("seen %#v", seen)
+}
+
 func TestCreateTableResponse(t *testing.T) {
 	// We need to ensure that invoking CreateTable returns
 	// the  ColumnFamilies as well as Granularity.

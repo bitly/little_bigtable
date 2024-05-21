@@ -19,7 +19,7 @@ import (
 
 const (
 	maxMsgSize = 256 * 1024 * 1024 // 256 MiB
-	version    = "0.1.0"
+	version    = "0.1.1"
 )
 
 func main() {

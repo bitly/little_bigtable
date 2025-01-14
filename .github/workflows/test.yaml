@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         imgtag:
-          - "golang:1.22-bullseye"
+          - "golang:1.23-bullseye"
         goarch:
           - "amd64"
 
@@ -23,7 +23,7 @@ jobs:
       SRCDIR: "go/src/github.com/bitly/little_bigtable"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           path: ${{env.SRCDIR}}
 

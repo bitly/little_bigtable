@@ -36,9 +36,11 @@ import (
 	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/protobuf/field_mask"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 func TestMain(m *testing.M) {
@@ -285,6 +287,10 @@ func TestCreateTableResponse(t *testing.T) {
 				"cf1": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 123}}},
 				"cf2": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 456}}},
 			},
+			AutomatedBackupConfig: getAutomatedBackupConfig(&btapb.Table_AutomatedBackupPolicy{
+				Frequency:       durationpb.New(24 * time.Hour),
+				RetentionPeriod: durationpb.New(72 * time.Hour),
+			}),
 		},
 	})
 	if err != nil {
@@ -298,6 +304,12 @@ func TestCreateTableResponse(t *testing.T) {
 		ColumnFamilies: map[string]*btapb.ColumnFamily{
 			"cf1": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 123}}},
 			"cf2": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 456}}},
+		},
+		AutomatedBackupConfig: &btapb.Table_AutomatedBackupPolicy_{
+			AutomatedBackupPolicy: &btapb.Table_AutomatedBackupPolicy{
+				Frequency:       durationpb.New(24 * time.Hour),
+				RetentionPeriod: durationpb.New(72 * time.Hour),
+			},
 		},
 	}
 	require.Equal(t, want, got)
@@ -338,6 +350,53 @@ func TestCreateTableWithFamily(t *testing.T) {
 	if got, want := cf.GcRule.GetMaxNumVersions(), int32(456); got != want {
 		t.Errorf("Invalid MaxNumVersions: wanted:%d, got:%d", want, got)
 	}
+}
+
+func TestUpdateTable(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	createdTbl, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  "projects/issue-1512/instances/instance",
+		TableId: "t",
+		Table: &btapb.Table{
+			ColumnFamilies: map[string]*btapb.ColumnFamily{
+				"cf1": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 1}}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Creating table: %v", err)
+	}
+
+	createdBackupPolicy := getAutomatedBackupPolicy(createdTbl)
+	require.Nil(t, createdBackupPolicy)
+
+	_, err = s.UpdateTable(ctx, &btapb.UpdateTableRequest{
+		Table: &btapb.Table{
+			Name: createdTbl.Name,
+			ColumnFamilies: map[string]*btapb.ColumnFamily{
+				"cf1": {GcRule: &btapb.GcRule{Rule: &btapb.GcRule_MaxNumVersions{MaxNumVersions: 1}}},
+			},
+			AutomatedBackupConfig: getAutomatedBackupConfig(&btapb.Table_AutomatedBackupPolicy{
+				Frequency:       durationpb.New(24 * time.Hour),
+				RetentionPeriod: durationpb.New(72 * time.Hour),
+			}),
+		},
+		UpdateMask: &field_mask.FieldMask{
+			Paths: []string{"automated_backup_policy.retention_period", "automated_backup_policy.frequency"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Updating table: %v", err)
+	}
+
+	updatedTbl, err := s.GetTable(ctx, &btapb.GetTableRequest{Name: createdTbl.Name})
+	if err != nil {
+		t.Fatalf("Getting table: %v", err)
+	}
+	updatedBackupPolicy := getAutomatedBackupPolicy(updatedTbl)
+	require.Equal(t, updatedBackupPolicy.GetRetentionPeriod().Seconds, durationpb.New(72*time.Hour).Seconds)
+	require.Equal(t, updatedBackupPolicy.GetFrequency().Seconds, durationpb.New(24*time.Hour).Seconds)
 }
 
 type MockSampleRowKeysServer struct {

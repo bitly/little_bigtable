@@ -440,20 +440,39 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 			case *btpb.RowRange_EndKeyOpen:
 				end = string(ek.EndKeyOpen)
 			}
-			switch {
-			case start == "" && end == "":
-				tbl.rows.Ascend(addRow) // all rows
-			case start == "":
-				tbl.rows.AscendLessThan(btreeKey(end), addRow)
-			case end == "":
-				tbl.rows.AscendGreaterOrEqual(btreeKey(start), addRow)
-			default:
-				tbl.rows.AscendRange(btreeKey(start), btreeKey(end), addRow)
+
+			// Use descending order methods if reversed is requested
+			if req.Reversed {
+				switch {
+				case start == "" && end == "":
+					tbl.rows.Descend(addRow) // all rows
+				case start == "":
+					tbl.rows.DescendLessThan(btreeKey(end), addRow)
+				case end == "":
+					tbl.rows.DescendGreaterOrEqual(btreeKey(start), addRow)
+				default:
+					tbl.rows.DescendRange(btreeKey(start), btreeKey(end), addRow)
+				}
+			} else {
+				switch {
+				case start == "" && end == "":
+					tbl.rows.Ascend(addRow) // all rows
+				case start == "":
+					tbl.rows.AscendLessThan(btreeKey(end), addRow)
+				case end == "":
+					tbl.rows.AscendGreaterOrEqual(btreeKey(start), addRow)
+				default:
+					tbl.rows.AscendRange(btreeKey(start), btreeKey(end), addRow)
+				}
 			}
 		}
 	} else {
 		// Read all rows
-		tbl.rows.Ascend(addRow)
+		if req.Reversed {
+			tbl.rows.Descend(addRow)
+		} else {
+			tbl.rows.Ascend(addRow)
+		}
 	}
 	gcRules := tbl.gcRulesNoLock()
 	tbl.mu.RUnlock()
@@ -481,7 +500,11 @@ func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRo
 			rows = append(rows, r)
 		}
 	}
-	sort.Sort(byRowKey(rows))
+	if req.Reversed {
+		sort.Sort(sort.Reverse(byRowKey(rows)))
+	} else {
+		sort.Sort(byRowKey(rows))
+	}
 
 	limit := int(req.RowsLimit)
 	count := 0

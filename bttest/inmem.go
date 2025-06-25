@@ -1464,10 +1464,12 @@ func (r *row) String() string {
 var gcTypeWarn sync.Once
 
 func init() {
-	gob.Register(&btapb.GcRule_Intersection_{})
-	gob.Register(&btapb.GcRule_Union_{})
-	gob.Register(&btapb.GcRule_MaxAge{})
-	gob.Register(&btapb.GcRule_MaxNumVersions{})
+	// RegisterName fixes https://github.com/bitly/little_bigtable/issues/24
+	gob.RegisterName("*admin.GcRule_Intersection_", &btapb.GcRule_Intersection_{})
+	gob.RegisterName("*admin.GcRule_MaxNumVersions", &btapb.GcRule_MaxNumVersions{})
+	gob.RegisterName("*admin.GcRule_Union", &btapb.GcRule_Union{})
+	gob.RegisterName("*admin.GcRule_Union_", &btapb.GcRule_Union_{})
+	gob.RegisterName("*admin.GcRule_MaxAge", &btapb.GcRule_MaxAge{})
 }
 
 // applyGC applies the given GC rule to the cells.

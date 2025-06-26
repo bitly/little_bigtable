@@ -58,6 +58,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/anypb"
 	"rsc.io/binaryregexp"
 )
 
@@ -120,6 +121,10 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 			tableBackend: NewSqlTables(db),
 		},
 	}
+	opsServer := &operationsServer{
+		operations: make(map[string]*longrunningpb.Operation),
+	}
+	longrunningpb.RegisterOperationsServer(s.srv, opsServer)
 	s.s.LoadTables()
 	btapb.RegisterBigtableInstanceAdminServer(s.srv, s.s)
 	btapb.RegisterBigtableTableAdminServer(s.srv, s.s)
@@ -162,9 +167,10 @@ func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest)
 	s.mu.Unlock()
 
 	ct := &btapb.Table{
-		Name:           tbl,
-		ColumnFamilies: req.GetTable().GetColumnFamilies(),
-		Granularity:    req.GetTable().GetGranularity(),
+		Name:                  tbl,
+		ColumnFamilies:        req.GetTable().GetColumnFamilies(),
+		Granularity:           req.GetTable().GetGranularity(),
+		AutomatedBackupConfig: req.GetTable().GetAutomatedBackupConfig(),
 	}
 	if ct.Granularity == 0 {
 		ct.Granularity = btapb.Table_MILLIS
@@ -202,13 +208,42 @@ func (s *server) GetTable(ctx context.Context, req *btapb.GetTableRequest) (*bta
 	}
 
 	return &btapb.Table{
-		Name:           tbl,
-		ColumnFamilies: toColumnFamilies(tblIns.columnFamilies()),
+		Name:                  tbl,
+		ColumnFamilies:        toColumnFamilies(tblIns.columnFamilies()),
+		AutomatedBackupConfig: getAutomatedBackupConfig(tblIns.backupPolicy),
 	}, nil
 }
 
-func (s *server) UpdateTable(context.Context, *btapb.UpdateTableRequest) (*longrunningpb.Operation, error) {
-	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support table updates")
+func (s *server) UpdateTable(ctx context.Context, req *btapb.UpdateTableRequest) (*longrunningpb.Operation, error) {
+	if req.UpdateMask.GetPaths() == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "update mask is required")
+	}
+	for _, path := range req.UpdateMask.GetPaths() {
+		if !strings.HasPrefix(path, "automated_backup_policy.") {
+			return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support updates other than automated_backup_policy")
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tables[req.Table.Name].backupPolicy = getAutomatedBackupPolicy(req.Table)
+	ct := &btapb.Table{
+		Name:                  req.Table.Name,
+		ColumnFamilies:        req.GetTable().GetColumnFamilies(),
+		AutomatedBackupConfig: req.GetTable().GetAutomatedBackupConfig(),
+	}
+
+	respAny, err := anypb.New(ct)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to wrap result: %v", err)
+	}
+	op := &longrunningpb.Operation{
+		Name:   fmt.Sprintf("operations/op-%d", time.Now().UnixNano()),
+		Done:   true,
+		Result: &longrunningpb.Operation_Response{Response: respAny},
+	}
+
+	return op, nil
 }
 
 func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest) (*emptypb.Empty, error) {
@@ -273,9 +308,10 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 	s.tableBackend.Save(tbl)
 
 	return &btapb.Table{
-		Name:           req.Name,
-		ColumnFamilies: toColumnFamilies(tbl.families),
-		Granularity:    btapb.Table_TimestampGranularity(btapb.Table_MILLIS),
+		Name:                  req.Name,
+		ColumnFamilies:        toColumnFamilies(tbl.families),
+		Granularity:           btapb.Table_TimestampGranularity(btapb.Table_MILLIS),
+		AutomatedBackupConfig: getAutomatedBackupConfig(tbl.backupPolicy),
 	}, nil
 }
 
@@ -1279,12 +1315,13 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 }
 
 type table struct {
-	parent   string
-	tableId  string
-	mu       sync.RWMutex
-	counter  uint64                   // increment by 1 when a new family is created
-	families map[string]*columnFamily // keyed by plain family name
-	rows     *SqlRows                 // indexed by row key
+	parent       string
+	tableId      string
+	mu           sync.RWMutex
+	counter      uint64                   // increment by 1 when a new family is created
+	families     map[string]*columnFamily // keyed by plain family name
+	rows         *SqlRows                 // indexed by row key
+	backupPolicy *btapb.Table_AutomatedBackupPolicy
 }
 
 const btreeDegree = 16
@@ -1303,11 +1340,12 @@ func newTable(ctr *btapb.CreateTableRequest, db *sql.DB) *table {
 		}
 	}
 	return &table{
-		parent:   ctr.Parent,
-		tableId:  ctr.TableId,
-		families: fams,
-		counter:  c,
-		rows:     NewSqlRows(db, ctr.Parent, ctr.TableId),
+		parent:       ctr.Parent,
+		tableId:      ctr.TableId,
+		families:     fams,
+		counter:      c,
+		rows:         NewSqlRows(db, ctr.Parent, ctr.TableId),
+		backupPolicy: getAutomatedBackupPolicy(ctr.Table),
 	}
 }
 
@@ -1589,4 +1627,22 @@ func toColumnFamilies(families map[string]*columnFamily) map[string]*btapb.Colum
 		fs[k] = v.proto()
 	}
 	return fs
+}
+
+func getAutomatedBackupConfig(policy *btapb.Table_AutomatedBackupPolicy) *btapb.Table_AutomatedBackupPolicy_ {
+	if policy == nil {
+		return nil
+	}
+	return &btapb.Table_AutomatedBackupPolicy_{
+		AutomatedBackupPolicy: policy,
+	}
+}
+
+func getAutomatedBackupPolicy(bTable *btapb.Table) *btapb.Table_AutomatedBackupPolicy {
+	if bTable != nil && bTable.AutomatedBackupConfig != nil {
+		if policy, ok := bTable.AutomatedBackupConfig.(*btapb.Table_AutomatedBackupPolicy_); ok {
+			return policy.AutomatedBackupPolicy
+		}
+	}
+	return nil
 }

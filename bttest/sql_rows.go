@@ -101,6 +101,27 @@ func (db *SqlRows) AscendRange(greaterOrEqual, lessThan Item, iterator ItemItera
 	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key ASC", db.parent, db.tableId, ge.key, lt.key)
 }
 
+// Descending order methods for reverse scans
+func (db *SqlRows) Descend(iterator ItemIterator) {
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? ORDER BY row_key DESC", db.parent, db.tableId)
+}
+
+func (db *SqlRows) DescendGreaterOrEqual(pivot Item, iterator ItemIterator) {
+	row := pivot.(*row)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? ORDER BY row_key DESC", db.parent, db.tableId, row.key)
+}
+
+func (db *SqlRows) DescendLessThan(pivot Item, iterator ItemIterator) {
+	row := pivot.(*row)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key < ? ORDER BY row_key DESC", db.parent, db.tableId, row.key)
+}
+
+func (db *SqlRows) DescendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
+	ge := greaterOrEqual.(*row)
+	lt := lessThan.(*row)
+	db.query(iterator, "SELECT row_key, families FROM rows_t WHERE parent = ? and table_id = ? and row_key >= ? and row_key < ? ORDER BY row_key DESC", db.parent, db.tableId, ge.key, lt.key)
+}
+
 func (db *SqlRows) DeleteAll() {
 	db.mu.Lock()
 	defer db.mu.Unlock()

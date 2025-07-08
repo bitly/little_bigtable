@@ -219,7 +219,7 @@ func (s *server) UpdateTable(ctx context.Context, req *btapb.UpdateTableRequest)
 		return nil, status.Errorf(codes.InvalidArgument, "update mask is required")
 	}
 	for _, path := range req.UpdateMask.GetPaths() {
-		if !strings.HasPrefix(path, "automated_backup_policy.") {
+		if !strings.HasPrefix(path, "automated_backup_policy") {
 			return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support updates other than automated_backup_policy")
 		}
 	}

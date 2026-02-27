@@ -24,6 +24,7 @@ type SqlRows struct {
 	db *sql.DB
 }
 
+// NewSqlRows returns a SqlRows for a specific table within the given parent instance path.
 func NewSqlRows(db *sql.DB, parent, tableId string) *SqlRows {
 	return &SqlRows{
 		parent:  parent,

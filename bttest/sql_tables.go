@@ -15,6 +15,7 @@ type SqlTables struct {
 	db *sql.DB
 }
 
+// NewSqlTables returns a SqlTables backed by the given DB.
 func NewSqlTables(db *sql.DB) *SqlTables {
 	return &SqlTables{
 		db: db,
@@ -51,6 +52,7 @@ func (t *table) Bytes() ([]byte, error) {
 	return b.Bytes(), err
 }
 
+// Get loads a single table's metadata from the DB. Returns nil if not found.
 func (db *SqlTables) Get(parent, tableId string) *table {
 	tbl := &table{
 		parent:  parent,
@@ -64,6 +66,7 @@ func (db *SqlTables) Get(parent, tableId string) *table {
 	return tbl
 }
 
+// GetAll loads all table metadata from the DB, used to restore state on startup.
 func (db *SqlTables) GetAll() []*table {
 	var tables []*table
 
@@ -89,6 +92,7 @@ func (db *SqlTables) GetAll() []*table {
 	return tables
 }
 
+// Save upserts a table's metadata (column family definitions) to the DB.
 func (db *SqlTables) Save(t *table) {
 	metadata, err := t.Bytes()
 	if err != nil {
@@ -103,6 +107,7 @@ func (db *SqlTables) Save(t *table) {
 	}
 }
 
+// Delete removes a table's metadata record from the DB.
 func (db *SqlTables) Delete(t *table) {
 	_, err := db.db.Exec("DELETE FROM tables_t WHERE parent = ? AND table_id = ? ", t.parent, t.tableId)
 	if err != nil {

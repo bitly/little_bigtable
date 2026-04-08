@@ -94,6 +94,10 @@ type server struct {
 	gcc          chan int                   // set when gcloop starts, closed when server shuts down
 	db           *sql.DB
 	tableBackend *SqlTables
+	mvBackend    *SqlMaterializedViews
+	cmvs         *cmvRegistry
+
+	materializedViews map[string]*btapb.MaterializedView // keyed by full resource name
 
 	// Any unimplemented methods will cause a panic.
 	btapb.BigtableTableAdminServer
@@ -115,10 +119,13 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 		l:    l,
 		srv:  grpc.NewServer(opt...),
 		s: &server{
-			tables:       make(map[string]*table),
-			instances:    make(map[string]*btapb.Instance),
-			db:           db,
-			tableBackend: NewSqlTables(db),
+			tables:            make(map[string]*table),
+			instances:         make(map[string]*btapb.Instance),
+			materializedViews: make(map[string]*btapb.MaterializedView),
+			db:                db,
+			tableBackend:      NewSqlTables(db),
+			mvBackend:         NewSqlMaterializedViews(db),
+			cmvs:              newCMVRegistry(),
 		},
 	}
 	opsServer := &operationsServer{
@@ -126,6 +133,7 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 	}
 	longrunningpb.RegisterOperationsServer(s.srv, opsServer)
 	s.s.LoadTables()
+	s.s.LoadMaterializedViews()
 	btapb.RegisterBigtableInstanceAdminServer(s.srv, s.s)
 	btapb.RegisterBigtableTableAdminServer(s.srv, s.s)
 	btpb.RegisterBigtableServer(s.srv, s.s)
@@ -152,6 +160,143 @@ func (s *server) LoadTables() {
 	for _, t := range tables {
 		s.tables[t.parent+"/tables/"+t.tableId] = t
 	}
+}
+
+// LoadMaterializedViews restores persisted CMV metadata from SQLite on startup.
+// For each stored view, it re-parses the SQL to reconstruct the CMVConfig and
+// re-registers it so that write-time propagation resumes immediately.
+func (s *server) LoadMaterializedViews() {
+	for _, v := range s.mvBackend.GetAll() {
+		cfg, err := ParseCMVConfigFromSQL(viewIDFromName(v.name), v.query)
+		if err != nil {
+			// Log and skip rather than crashing — the parser may have evolved.
+			log.Printf("WARNING: skipping persisted materialized view %q: could not parse query: %v", v.name, err)
+			continue
+		}
+		s.cmvs.register(*cfg)
+		s.materializedViews[v.name] = &btapb.MaterializedView{
+			Name:               v.name,
+			Query:              v.query,
+			DeletionProtection: v.deletionProtection,
+		}
+	}
+}
+
+// viewIDFromName extracts the view ID from a full resource name of the form
+// projects/.../instances/.../materializedViews/<id>.
+func viewIDFromName(name string) string {
+	const sep = "/materializedViews/"
+	if idx := strings.LastIndex(name, sep); idx >= 0 {
+		return name[idx+len(sep):]
+	}
+	return name
+}
+
+// ensureCMVTable creates the shadow table for a CMV if it doesn't already exist.
+// Copies column families from the source table, filtered by IncludeFamilies.
+// Must be called with s.mu held.
+func (s *server) ensureCMVTable(cmv *cmvInstance, sourceTbl *table) {
+	fqView := cmv.parent + "/tables/" + cmv.config.ViewID
+	if _, exists := s.tables[fqView]; exists {
+		return
+	}
+
+	fams := make(map[string]*columnFamily)
+	var c uint64
+	sourceTbl.mu.RLock()
+	for id, cf := range sourceTbl.families {
+		if cmv.shouldIncludeFamily(id) {
+			fams[id] = &columnFamily{
+				Name:   fqView + "/columnFamilies/" + id,
+				Order:  c,
+				GCRule: cf.GCRule,
+			}
+			c++
+		}
+	}
+	sourceTbl.mu.RUnlock()
+
+	viewTbl := &table{
+		parent:   cmv.parent,
+		tableId:  cmv.config.ViewID,
+		families: fams,
+		counter:  c,
+		rows:     NewSqlRows(s.db, cmv.parent, cmv.config.ViewID),
+	}
+	s.tables[fqView] = viewTbl
+	s.tableBackend.Save(viewTbl)
+	log.Printf("created CMV shadow table %q for source %q", cmv.config.ViewID, cmv.config.SourceTable)
+}
+
+// syncCMVRow writes/updates the CMV shadow row for a given source row mutation.
+// Must NOT be called with s.mu held (acquires its own locks).
+func (s *server) syncCMVRow(fqSourceTable string, sourceRow *row) {
+	cmvs := s.cmvs.cmvsForTable(fqSourceTable)
+	if len(cmvs) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	sourceTbl := s.tables[fqSourceTable]
+	for _, cmv := range cmvs {
+		s.ensureCMVTable(cmv, sourceTbl)
+		fqView := cmv.parent + "/tables/" + cmv.config.ViewID
+		viewTbl := s.tables[fqView]
+		if viewTbl == nil {
+			continue
+		}
+		cmvRow := cmv.buildCMVRow(sourceRow)
+		viewTbl.mu.Lock()
+		viewTbl.rows.ReplaceOrInsert(cmvRow)
+		viewTbl.mu.Unlock()
+	}
+	s.mu.Unlock()
+}
+
+// deleteCMVRow removes the corresponding CMV row when a source row is deleted.
+// Must NOT be called with s.mu held (acquires its own locks).
+func (s *server) deleteCMVRow(fqSourceTable string, sourceKey string) {
+	cmvs := s.cmvs.cmvsForTable(fqSourceTable)
+	if len(cmvs) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	for _, cmv := range cmvs {
+		fqView := cmv.parent + "/tables/" + cmv.config.ViewID
+		viewTbl := s.tables[fqView]
+		if viewTbl == nil {
+			continue
+		}
+		cmvKey := cmv.deriveCMVKey(sourceKey)
+		viewTbl.mu.Lock()
+		viewTbl.rows.Delete(btreeKey(cmvKey))
+		viewTbl.mu.Unlock()
+	}
+	s.mu.Unlock()
+}
+
+// dropCMVAllRows clears all rows from CMV shadow tables when the source table is
+// fully truncated via DropRowRange(DeleteAllDataFromTable=true).
+// Must NOT be called with s.mu held (acquires its own locks).
+func (s *server) dropCMVAllRows(fqSourceTable string) {
+	cmvs := s.cmvs.cmvsForTable(fqSourceTable)
+	if len(cmvs) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	for _, cmv := range cmvs {
+		fqView := cmv.parent + "/tables/" + cmv.config.ViewID
+		viewTbl := s.tables[fqView]
+		if viewTbl == nil {
+			continue
+		}
+		viewTbl.mu.Lock()
+		viewTbl.rows.DeleteAll()
+		viewTbl.mu.Unlock()
+	}
+	s.mu.Unlock()
 }
 
 func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest) (*btapb.Table, error) {
@@ -249,12 +394,34 @@ func (s *server) UpdateTable(ctx context.Context, req *btapb.UpdateTableRequest)
 func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if tbl, ok := s.tables[req.Name]; !ok {
+	tbl, ok := s.tables[req.Name]
+	if !ok {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
-	} else {
-		s.tableBackend.Delete(tbl)
-		tbl.rows.DeleteAll()
-		delete(s.tables, req.Name)
+	}
+	s.tableBackend.Delete(tbl)
+	tbl.rows.DeleteAll()
+	delete(s.tables, req.Name)
+
+	// Clean up any CMVs that use this table as their source.
+	idx := strings.LastIndex(req.Name, "/tables/")
+	if idx >= 0 {
+		parent := req.Name[:idx]
+		tableID := req.Name[idx+len("/tables/"):]
+		for _, viewID := range s.cmvs.deregisterBySource(tableID) {
+			fqShadow := parent + "/tables/" + viewID
+			if shadowTbl, exists := s.tables[fqShadow]; exists {
+				s.tableBackend.Delete(shadowTbl)
+				shadowTbl.rows.DeleteAll()
+				delete(s.tables, fqShadow)
+			}
+			for mvName := range s.materializedViews {
+				if strings.HasSuffix(mvName, "/materializedViews/"+viewID) {
+					s.mvBackend.Delete(mvName)
+					delete(s.materializedViews, mvName)
+					break
+				}
+			}
+		}
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -323,14 +490,17 @@ func (s *server) DropRowRange(ctx context.Context, req *btapb.DropRowRangeReques
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 
+	deleteAll := req.GetDeleteAllDataFromTable()
+	var deletedKeys []string // populated for prefix case; nil for deleteAll
+
 	tbl.mu.Lock()
-	defer tbl.mu.Unlock()
-	if req.GetDeleteAllDataFromTable() {
+	if deleteAll {
 		tbl.rows.DeleteAll()
 	} else {
 		// Delete rows by prefix.
 		prefixBytes := req.GetRowKeyPrefix()
 		if prefixBytes == nil {
+			tbl.mu.Unlock()
 			return nil, fmt.Errorf("missing row key prefix")
 		}
 		prefix := string(prefixBytes)
@@ -349,8 +519,20 @@ func (s *server) DropRowRange(ctx context.Context, req *btapb.DropRowRangeReques
 		})
 		for _, r := range rowsToDelete {
 			tbl.rows.Delete(r)
+			deletedKeys = append(deletedKeys, r.key)
 		}
 	}
+	tbl.mu.Unlock()
+
+	// Propagate to CMV shadow tables.
+	if deleteAll {
+		s.dropCMVAllRows(req.Name)
+	} else {
+		for _, key := range deletedKeys {
+			s.deleteCMVRow(req.Name, key)
+		}
+	}
+
 	return &emptypb.Empty{}, nil
 }
 
@@ -943,10 +1125,19 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 	}
 	fs := tbl.columnFamilies()
 
+	// Check if any mutation is a full row delete (for CMV propagation).
+	hasDeleteFromRow := false
+	for _, mut := range req.Mutations {
+		if _, ok := mut.Mutation.(*btpb.Mutation_DeleteFromRow_); ok {
+			hasDeleteFromRow = true
+			break
+		}
+	}
+
 	tbl.mu.Lock()
-	defer tbl.mu.Unlock()
 	r := tbl.mutableRow(string(req.RowKey))
 	if err := applyMutations(tbl, r, req.Mutations, fs); err != nil {
+		tbl.mu.Unlock()
 		return nil, err
 	}
 	// JIT per-row GC
@@ -959,6 +1150,16 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 	}
 
 	tbl.rows.ReplaceOrInsert(r)
+	rowCopy := r.copy()
+	tbl.mu.Unlock()
+
+	// Propagate to CMV shadow tables.
+	if hasDeleteFromRow || rowCopy.isEmpty() {
+		s.deleteCMVRow(req.TableName, string(req.RowKey))
+	} else {
+		s.syncCMVRow(req.TableName, rowCopy)
+	}
+
 	return &btpb.MutateRowResponse{}, nil
 }
 
@@ -981,9 +1182,15 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 	}
 	res := &btpb.MutateRowsResponse{Entries: make([]*btpb.MutateRowsResponse_Entry, len(req.Entries))}
 
+	type cmvAction struct {
+		key     string
+		rowCopy *row
+		deleted bool
+	}
+	var cmvActions []cmvAction
+
 	cfs := tbl.columnFamilies()
 	tbl.mu.Lock()
-	defer tbl.mu.Unlock()
 	for i, entry := range req.Entries {
 		r := tbl.mutableRow(string(entry.RowKey))
 		code, msg := int32(codes.OK), ""
@@ -1003,7 +1210,33 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 			}
 		}
 		tbl.rows.ReplaceOrInsert(r)
+
+		if code == int32(codes.OK) {
+			deleted := false
+			for _, mut := range entry.Mutations {
+				if _, ok := mut.Mutation.(*btpb.Mutation_DeleteFromRow_); ok {
+					deleted = true
+					break
+				}
+			}
+			cmvActions = append(cmvActions, cmvAction{
+				key:     string(entry.RowKey),
+				rowCopy: r.copy(),
+				deleted: deleted || r.isEmpty(),
+			})
+		}
 	}
+	tbl.mu.Unlock()
+
+	// Propagate to CMV shadow tables after releasing the source table lock.
+	for _, action := range cmvActions {
+		if action.deleted {
+			s.deleteCMVRow(req.TableName, action.key)
+		} else {
+			s.syncCMVRow(req.TableName, action.rowCopy)
+		}
+	}
+
 	return stream.Send(res)
 }
 
@@ -1018,7 +1251,6 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 
 	cfs := tbl.columnFamilies()
 	tbl.mu.Lock()
-	defer tbl.mu.Unlock()
 	r := tbl.mutableRow(string(req.RowKey))
 
 	// Figure out which mutation to apply.
@@ -1033,6 +1265,7 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 
 		match, err := filterRow(req.PredicateFilter, nr)
 		if err != nil {
+			tbl.mu.Unlock()
 			return nil, err
 		}
 		whichMut = match && !nr.isEmpty()
@@ -1044,6 +1277,7 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 	}
 
 	if err := applyMutations(tbl, r, muts, cfs); err != nil {
+		tbl.mu.Unlock()
 		return nil, err
 	}
 	r.gc(tbl.gcRulesNoLock())
@@ -1054,6 +1288,25 @@ func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutate
 		}
 	}
 	tbl.rows.ReplaceOrInsert(r)
+
+	// Determine if this was a delete-type operation.
+	hasDelete := false
+	for _, mut := range muts {
+		if _, ok := mut.Mutation.(*btpb.Mutation_DeleteFromRow_); ok {
+			hasDelete = true
+			break
+		}
+	}
+	rowCopy := r.copy()
+	tbl.mu.Unlock()
+
+	// Propagate to CMV shadow tables.
+	if hasDelete || rowCopy.isEmpty() {
+		s.deleteCMVRow(req.TableName, string(req.RowKey))
+	} else {
+		s.syncCMVRow(req.TableName, rowCopy)
+	}
+
 	return res, nil
 }
 
@@ -1184,7 +1437,6 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 
 	cfs := tbl.columnFamilies()
 	tbl.mu.Lock()
-	defer tbl.mu.Unlock()
 	rowKey := string(req.RowKey)
 	r := tbl.mutableRow(rowKey)
 	resultRow := newRow(rowKey) // copy of updated cells
@@ -1193,6 +1445,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 	// TODO(dsymonds): Verify this assumption and document it in the proto.
 	for _, rule := range req.Rules {
 		if _, ok := cfs[rule.FamilyName]; !ok {
+			tbl.mu.Unlock()
 			return nil, fmt.Errorf("unknown family %q", rule.FamilyName)
 		}
 
@@ -1216,6 +1469,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 
 		switch rule := rule.Rule.(type) {
 		default:
+			tbl.mu.Unlock()
 			return nil, fmt.Errorf("unknown RMW rule oneof %T", rule)
 		case *btpb.ReadModifyWriteRule_AppendValue:
 			newCell = cell{Ts: ts, Value: append(prevCell.Value, rule.AppendValue...)}
@@ -1224,6 +1478,7 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 			if !isEmpty {
 				prevVal := prevCell.Value
 				if len(prevVal) != 8 {
+					tbl.mu.Unlock()
 					return nil, fmt.Errorf("increment on non-64-bit value")
 				}
 				v = int64(binary.BigEndian.Uint64(prevVal))
@@ -1250,6 +1505,11 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 		}
 	}
 	tbl.rows.ReplaceOrInsert(r)
+	rowCopy := r.copy()
+	tbl.mu.Unlock()
+
+	// Propagate to CMV shadow tables.
+	s.syncCMVRow(req.TableName, rowCopy)
 
 	// Build the response using the result row
 	res := &btpb.Row{

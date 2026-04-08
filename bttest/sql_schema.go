@@ -5,6 +5,8 @@ import (
 	"database/sql"
 )
 
+// CreateTables initializes the SQLite schema for the emulator, creating all
+// required tables if they do not already exist. Safe to call on an existing DB.
 func CreateTables(ctx context.Context, db *sql.DB) error {
 	query := "CREATE TABLE IF NOT EXISTS rows_t ( \n" +
 		"`parent` TEXT NOT NULL,\n" +
@@ -28,6 +30,16 @@ func CreateTables(ctx context.Context, db *sql.DB) error {
 		"PRIMARY KEY  (`parent`, `table_id`)\n" +
 		")"
 	// log.Print(query)
+	_, err = db.ExecContext(ctx, query)
+	if err != nil {
+		return err
+	}
+
+	query = "CREATE TABLE IF NOT EXISTS materialized_views_t (\n" +
+		"`name` TEXT PRIMARY KEY,\n" +
+		"`query` TEXT NOT NULL,\n" +
+		"`deletion_protection` INTEGER NOT NULL DEFAULT 0\n" +
+		")"
 	_, err = db.ExecContext(ctx, query)
 	if err != nil {
 		return err

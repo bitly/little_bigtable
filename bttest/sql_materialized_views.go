@@ -56,8 +56,7 @@ func (m *SqlMaterializedViews) Save(name, query string, deletionProtection bool)
 		dp = 1
 	}
 	_, err := m.db.Exec(
-		"INSERT INTO materialized_views_t (name, query, deletion_protection) VALUES (?, ?, ?)"+
-			" ON CONFLICT(name) DO UPDATE SET query=excluded.query, deletion_protection=excluded.deletion_protection",
+		"INSERT OR REPLACE INTO materialized_views_t (name, query, deletion_protection) VALUES (?, ?, ?)",
 		name, query, dp,
 	)
 	if err != nil {

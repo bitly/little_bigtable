@@ -13,7 +13,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/genproto v0.0.0-20260630182238-925bb5da69e7
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260630182238-925bb5da69e7
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 	rsc.io/binaryregexp v0.2.0
 )

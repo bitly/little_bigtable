@@ -53,8 +53,21 @@ func TestCMVTransformKey(t *testing.T) {
 	got := inst.transformKey(sourceKey)
 	// parts: [0]device-1 [1]ts-100 [2]us-east [3]user-42
 	// mapped: parts[2]#parts[3]#parts[1]#parts[0] + full source key
-	want := "us-east#user-42#ts-100#device-1#device-1#ts-100#us-east#user-42"
+	want := "us-east\x00\x01user-42\x00\x01ts-100\x00\x01device-1\x00\x01device-1#ts-100#us-east#user-42"
 	assert.Equal(t, want, got)
+}
+
+func TestCMVTransformKeyEscapesNUL(t *testing.T) {
+	inst := &cmvInstance{
+		config: CMVConfig{
+			SourceTable:  "t",
+			ViewID:       "v",
+			KeySeparator: "#",
+			KeyMapping:   []int{1, 0},
+		},
+	}
+	got := inst.transformKey("a\x00b#c\x00")
+	assert.Equal(t, "c\x00\xff\x00\x01a\x00\xffb", got)
 }
 
 func TestCMVTransformKeyNoAppend(t *testing.T) {
@@ -70,7 +83,7 @@ func TestCMVTransformKeyNoAppend(t *testing.T) {
 
 	sourceKey := "a#b#c"
 	got := inst.transformKey(sourceKey)
-	assert.Equal(t, "c#a#b", got)
+	assert.Equal(t, "c\x00\x01a\x00\x01b", got)
 }
 
 func TestCMVWriteSync(t *testing.T) {
@@ -125,14 +138,75 @@ func TestCMVWriteSync(t *testing.T) {
 	s.mu.Unlock()
 	require.True(t, ok, "CMV shadow table should be created")
 
-	// The CMV key should be beta#alpha (mapping [1, 0]).
-	cmvRow := cmvTbl.rows.Get(btreeKey("beta#alpha"))
+	// The CMV key should be beta,alpha (mapping [1, 0]) in prod's encoding.
+	wantKey := "beta\x00\x01alpha"
+	cmvRow := cmvTbl.rows.Get(btreeKey(wantKey))
 	require.NotNil(t, cmvRow)
 	r := cmvRow.(*row)
-	assert.Equal(t, "beta#alpha", r.key)
+	assert.Equal(t, wantKey, r.key)
 	assert.Contains(t, r.families, "cf1")
 	assert.Contains(t, r.families["cf1"].Cells, "col")
 	assert.Equal(t, []byte("hello"), r.families["cf1"].Cells["col"][0].Value)
+}
+
+// TestCMVMultiColumnKeyEncoding creates a view from SQL with several key
+// columns, writes a source row, and reads the view row back over ReadRows to
+// check the exact key bytes match prod Bigtable's encoding.
+func TestCMVMultiColumnKeyEncoding(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := ParseCMVConfigFromSQL("src_by_foo", "SELECT\n"+
+		"  SPLIT(_key, '#')[SAFE_OFFSET(1)] AS foo,\n"+
+		"  SPLIT(_key, '#')[SAFE_OFFSET(2)] AS bar,\n"+
+		"  SPLIT(_key, '#')[SAFE_OFFSET(0)] AS baz,\n"+
+		"  _key AS src_key,\n"+
+		"  cf1 AS cf1\n"+
+		"FROM `src_table`\n"+
+		"ORDER BY foo, bar, baz, src_key")
+	require.NoError(t, err)
+	s := newTestServerWithCMV(t, []CMVConfig{*cfg})
+
+	parent := "projects/test/instances/test"
+	fqSrc := parent + "/tables/src_table"
+	fqView := parent + "/tables/src_by_foo"
+
+	_, err = s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  parent,
+		TableId: "src_table",
+		Table: &btapb.Table{
+			ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = s.MutateRow(ctx, &btpb.MutateRowRequest{
+		TableName: fqSrc,
+		RowKey:    []byte("ccc#aaa#bbb"),
+		Mutations: []*btpb.Mutation{{
+			Mutation: &btpb.Mutation_SetCell_{
+				SetCell: &btpb.Mutation_SetCell{
+					FamilyName:      "cf1",
+					ColumnQualifier: []byte("c"),
+					TimestampMicros: 1000,
+					Value:           []byte("v"),
+				},
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	mock := &MockReadRowsServer{}
+	require.NoError(t, s.ReadRows(&btpb.ReadRowsRequest{TableName: fqView}, mock))
+
+	var keys [][]byte
+	for _, resp := range mock.responses {
+		for _, c := range resp.Chunks {
+			if len(c.RowKey) > 0 {
+				keys = append(keys, c.RowKey)
+			}
+		}
+	}
+	require.Len(t, keys, 1)
+	assert.Equal(t, []byte("aaa\x00\x01bbb\x00\x01ccc\x00\x01ccc#aaa#bbb"), keys[0])
 }
 
 func TestCMVDeleteSync(t *testing.T) {
@@ -271,7 +345,7 @@ func TestCMVTransformKeyOutOfBounds(t *testing.T) {
 	}
 	// Should not panic; out-of-bounds index produces an empty component.
 	got := inst.transformKey("only#two#parts")
-	assert.Equal(t, "only#", got)
+	assert.Equal(t, "only\x00\x01", got)
 }
 
 func TestCreateMaterializedViewRPC(t *testing.T) {
@@ -413,10 +487,10 @@ func TestCMVDropRowRangePrefix(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// CMV should now have only 1 row: "three#beta" (from "beta#three").
+	// CMV should now have only 1 row: "three\x00\x01beta" (from "beta#three").
 	assert.Equal(t, 1, cmvTbl.rows.Len())
-	// The remaining CMV row should be the transformed "beta#three" → "three#beta".
-	cmvRow := cmvTbl.rows.Get(btreeKey("three#beta"))
+	// The remaining CMV row should be the transformed "beta#three" → "three\x00\x01beta".
+	cmvRow := cmvTbl.rows.Get(btreeKey("three\x00\x01beta"))
 	assert.NotNil(t, cmvRow, "CMV row for non-deleted source should still exist")
 }
 

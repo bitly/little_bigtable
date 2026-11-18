@@ -97,10 +97,16 @@ With `ORDER BY region, account_id, timestamp, type, item_id, src_key`, a source 
 ```
 item-abc#9999999#type-x#region-a#account-42
 ```
-Becomes CMV key:
+Becomes CMV key (shown with `\x00\x01` written out):
 ```
-region-a#account-42#9999999#type-x#item-abc#item-abc#9999999#type-x#region-a#account-42
+region-a\x00\x01account-42\x00\x019999999\x00\x01type-x\x00\x01item-abc\x00\x01item-abc#9999999#type-x#region-a#account-42
 ```
 
-The first 5 components are the re-ordered key; the remainder is the full original source
-key appended because `_key AS src_key` appears in the `ORDER BY`.
+This matches prod Bigtable's encoding for multi-column view keys: string columns appear in
+`ORDER BY` order, each terminated with `\x00\x01` (a `\x00` inside a value is escaped as
+`\x00\xff`), and the final column is left unterminated. The source key's `#` layout is not
+reused for the view key; the original source key is the last column (because `_key AS src_key`
+appears in the `ORDER BY`).
+
+Note: view rows written by earlier versions of the emulator used `#`-joined keys. Re-write
+the source rows (or recreate the database) to get keys in the new format.

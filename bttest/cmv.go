@@ -13,12 +13,14 @@ type CMVConfig struct {
 	SourceTable string `json:"source_table"`
 	// ViewID is the materialized view ID (used as the table name for reads).
 	ViewID string `json:"view_id"`
-	// KeySeparator is the delimiter used in the source table's composite row key.
+	// KeySeparator is the delimiter used in the source table's composite row key
+	// (used only to split the source key).
 	KeySeparator string `json:"key_separator"`
 	// KeyMapping defines how source key components map to CMV key components.
 	// Each entry is the 0-based index into the SPLIT result of the source key.
-	// The CMV row key is built by joining the mapped components with KeySeparator.
-	// Example: [3,4,1,2,0] means CMV key = source[3]#source[4]#source[1]#source[2]#source[0]
+	// The CMV row key is built from the mapped components using prod Bigtable's
+	// multi-column encoding (see transformKey), not by joining with KeySeparator.
+	// Example: [3,4,1,2,0] means CMV key = source[3] \x00\x01 source[4] \x00\x01 source[1] ...
 	KeyMapping []int `json:"key_mapping"`
 	// IncludeFamilies lists the column families to carry from source to CMV.
 	// An empty list means all families are included.
@@ -112,22 +114,36 @@ type cmvInstance struct {
 	parent string // e.g., projects/p/instances/i
 }
 
+// Row key encoding used by prod Bigtable for materialized views with several
+// key columns: every string column except the last is terminated with
+// cmvKeyTerminator, and a 0x00 byte inside a value is escaped as cmvKeyEscape.
+const (
+	cmvKeyTerminator = "\x00\x01"
+	cmvKeyEscape     = "\x00\xff"
+)
+
+// transformKey builds the view row key for a source key. Key columns appear in
+// ORDER BY order, encoded as described above; the source key (if selected as a
+// key column) is the final, unterminated column.
 func (c *cmvInstance) transformKey(sourceKey string) string {
 	parts := strings.Split(sourceKey, c.config.KeySeparator)
-	var newParts []string
+	cols := make([]string, 0, len(c.config.KeyMapping)+1)
 	for _, idx := range c.config.KeyMapping {
 		if idx < len(parts) {
-			newParts = append(newParts, parts[idx])
+			cols = append(cols, parts[idx])
 		} else {
 			log.Printf("CMV %q: key_mapping index %d out of bounds for source key %q (%d parts) — check your config",
 				c.config.ViewID, idx, sourceKey, len(parts))
-			newParts = append(newParts, "")
+			cols = append(cols, "")
 		}
 	}
 	if c.config.AppendSourceKey {
-		newParts = append(newParts, sourceKey)
+		cols = append(cols, sourceKey)
 	}
-	return strings.Join(newParts, c.config.KeySeparator)
+	for i, col := range cols {
+		cols[i] = strings.ReplaceAll(col, "\x00", cmvKeyEscape)
+	}
+	return strings.Join(cols, cmvKeyTerminator)
 }
 
 // shouldIncludeFamily returns true for all families when IncludeFamilies is empty.

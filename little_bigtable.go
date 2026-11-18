@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"runtime/debug"
 
 	"github.com/bitly/little_bigtable/bttest"
 	_ "github.com/mattn/go-sqlite3"
@@ -19,8 +20,22 @@ import (
 
 const (
 	maxMsgSize = 256 * 1024 * 1024 // 256 MiB
-	version    = "0.2.0"
 )
+
+// buildInfo returns the module version and Go version the binary was built with.
+func buildInfo() string {
+	v := "(devel)"
+	goVersion := runtime.Version()
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" {
+			v = info.Main.Version
+		}
+		if info.GoVersion != "" {
+			goVersion = info.GoVersion
+		}
+	}
+	return fmt.Sprintf("little_bigtable version %s (built with %s)\n", v, goVersion)
+}
 
 func main() {
 	host := flag.String("host", "localhost", "the address to bind to on the local machine")
@@ -30,11 +45,16 @@ func main() {
 
 	ctx := context.Background()
 	grpc.EnableTracing = false
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(flag.CommandLine.Output(), "\n%s", buildInfo())
+	}
 	flag.Parse()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	if *showVersion {
-		fmt.Printf("little_bigtable v%s (built w/%s)", version, runtime.Version())
+		fmt.Print(buildInfo())
 		os.Exit(0)
 	}
 

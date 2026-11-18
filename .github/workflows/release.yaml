@@ -7,18 +7,17 @@ permissions:
     packages: write
 
 jobs:
-  release-go-binary:
-    name: release Go Binary
+  releases-matrix:
+    name: release
     runs-on: ubuntu-latest
     strategy:
       matrix:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: wangyoucao577/go-release-action@v1
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
-        goversion: "1.27"

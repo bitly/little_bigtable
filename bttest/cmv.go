@@ -49,6 +49,20 @@ func (r *cmvRegistry) register(cfg CMVConfig) {
 	r.configs[cfg.SourceTable] = append(r.configs[cfg.SourceTable], cfg)
 }
 
+// get returns the config registered for a view ID.
+func (r *cmvRegistry) get(viewID string) (CMVConfig, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, cfgs := range r.configs {
+		for _, c := range cfgs {
+			if c.ViewID == viewID {
+				return c, true
+			}
+		}
+	}
+	return CMVConfig{}, false
+}
+
 func (r *cmvRegistry) deregister(viewID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -575,3 +575,143 @@ func TestDeletionProtection_UpdateThenDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func cmvViewKeys(t *testing.T, tbl *table) []string {
+	t.Helper()
+	var keys []string
+	tbl.rows.Ascend(func(i Item) bool {
+		keys = append(keys, i.(*row).key)
+		return true
+	})
+	return keys
+}
+
+func putTestCell(t *testing.T, s *server, fqTable, key string) {
+	t.Helper()
+	_, err := s.MutateRow(context.Background(), &btpb.MutateRowRequest{
+		TableName: fqTable,
+		RowKey:    []byte(key),
+		Mutations: []*btpb.Mutation{{
+			Mutation: &btpb.Mutation_SetCell_{
+				SetCell: &btpb.Mutation_SetCell{
+					FamilyName:      "cf1",
+					ColumnQualifier: []byte("c"),
+					TimestampMicros: 1000,
+					Value:           []byte("v:" + key),
+				},
+			},
+		}},
+	})
+	require.NoError(t, err)
+}
+
+func TestCMVMigrateLegacyKeys(t *testing.T) {
+	ctx := context.Background()
+	cfg := CMVConfig{
+		SourceTable:     "src_table",
+		ViewID:          "src_by_b",
+		KeySeparator:    "#",
+		KeyMapping:      []int{1, 0},
+		AppendSourceKey: true,
+	}
+	s := newTestServerWithCMV(t, []CMVConfig{cfg})
+	parent := "projects/test/instances/test"
+	fqSrc := parent + "/tables/src_table"
+	fqView := parent + "/tables/src_by_b"
+	s.materializedViews[parent+"/materializedViews/src_by_b"] = &btapb.MaterializedView{}
+
+	_, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  parent,
+		TableId: "src_table",
+		Table:   &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+
+	// Rows written under the current encoding (also creates the view table).
+	putTestCell(t, s, fqSrc, "a1#b1")
+	putTestCell(t, s, fqSrc, "a2#b2")
+	viewTbl := s.tables[fqView]
+	require.NotNil(t, viewTbl)
+
+	// Simulate a database written by an older version: drop the new rows and
+	// store '#'-joined keys, including one for a source row that no longer exists.
+	viewTbl.rows.DeleteAll()
+	for _, k := range []string{"b1#a1#a1#b1", "b2#a2#a2#b2", "bX#aX#aX#bX"} {
+		viewTbl.rows.ReplaceOrInsert(&row{key: k, families: map[string]*family{}})
+	}
+
+	s.MigrateLegacyCMVKeys()
+
+	assert.Equal(t, []string{
+		"b1\x00\x01a1\x00\x01a1#b1",
+		"b2\x00\x01a2\x00\x01a2#b2",
+	}, cmvViewKeys(t, viewTbl))
+
+	// Rebuilt rows carry the source data.
+	got := viewTbl.rows.Get(btreeKey("b2\x00\x01a2\x00\x01a2#b2")).(*row)
+	require.Contains(t, got.families, "cf1")
+	assert.Equal(t, []byte("v:a2#b2"), got.families["cf1"].Cells["c"][0].Value)
+
+	// A second run finds nothing to migrate.
+	s.MigrateLegacyCMVKeys()
+	assert.Len(t, cmvViewKeys(t, viewTbl), 2)
+}
+
+func TestCMVMigrateLegacyKeysBatches(t *testing.T) {
+	ctx := context.Background()
+	cfg := CMVConfig{SourceTable: "src_table", ViewID: "v", KeySeparator: "#", KeyMapping: []int{1, 0}}
+	s := newTestServerWithCMV(t, []CMVConfig{cfg})
+	parent := "projects/test/instances/test"
+	s.materializedViews[parent+"/materializedViews/v"] = &btapb.MaterializedView{}
+
+	_, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  parent,
+		TableId: "src_table",
+		Table:   &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+
+	n := cmvMigrationBatchSize*2 + 7
+	putTestCell(t, s, parent+"/tables/src_table", "seed#seed")
+	viewTbl := s.tables[parent+"/tables/v"]
+	viewTbl.rows.DeleteAll()
+	src := s.tables[parent+"/tables/src_table"]
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("a%05d#b%05d", i, i)
+		src.rows.ReplaceOrInsert(&row{key: k, families: map[string]*family{}})
+		viewTbl.rows.ReplaceOrInsert(&row{key: fmt.Sprintf("b%05d#a%05d", i, i), families: map[string]*family{}})
+	}
+
+	s.MigrateLegacyCMVKeys()
+
+	keys := cmvViewKeys(t, viewTbl)
+	// n generated rows plus the seed row.
+	require.Len(t, keys, n+1)
+	for _, k := range keys {
+		assert.Contains(t, k, "\x00\x01")
+	}
+}
+
+func TestCMVMigrateSkipsSingleColumnViews(t *testing.T) {
+	ctx := context.Background()
+	cfg := CMVConfig{SourceTable: "src_table", ViewID: "v", KeySeparator: "#", KeyMapping: []int{1}}
+	s := newTestServerWithCMV(t, []CMVConfig{cfg})
+	parent := "projects/test/instances/test"
+	s.materializedViews[parent+"/materializedViews/v"] = &btapb.MaterializedView{}
+
+	_, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  parent,
+		TableId: "src_table",
+		Table:   &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+	putTestCell(t, s, parent+"/tables/src_table", "a#b")
+	putTestCell(t, s, parent+"/tables/src_table", "c#d")
+	viewTbl := s.tables[parent+"/tables/v"]
+	viewTbl.rows.Delete(btreeKey("d"))
+
+	s.MigrateLegacyCMVKeys()
+
+	// Single-column keys are identical in both formats; nothing is rebuilt.
+	assert.Equal(t, []string{"b"}, cmvViewKeys(t, viewTbl))
+}

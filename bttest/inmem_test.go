@@ -66,7 +66,7 @@ func newDBFile(t *testing.T) string {
 
 func newTestServer(t *testing.T) *server {
 	dbFilename := newDBFile(t)
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", dbFilename))
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?cache=shared", dbFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,8 @@ func SampleRowKeysConcurrentTest(t *testing.T, antagonist AntagonistFunction) {
 		finished <- true
 	}()
 	go antagonist(s, attempts, tbl.Name, finished)
-	timeout := time.After(15 * time.Second)
+	// generous timeout: under -race the pure-Go sqlite driver is heavily instrumented
+	timeout := time.After(60 * time.Second)
 	for i := 0; i < 2; i++ {
 		select {
 		case <-finished:

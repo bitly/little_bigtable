@@ -809,3 +809,73 @@ type mockSampleStream struct {
 }
 
 func (m *mockSampleStream) Send(*btpb.SampleRowKeysResponse) error { return nil }
+
+const emptyViewSQL = "SELECT\n" +
+	"  SPLIT(_key, '#')[SAFE_OFFSET(1)] AS b,\n" +
+	"  SPLIT(_key, '#')[SAFE_OFFSET(0)] AS a,\n" +
+	"  _key AS src_key,\n" +
+	"  cf1 AS cf1\n" +
+	"FROM `src`\n" +
+	"ORDER BY b, a, src_key"
+
+func createEmptyViewTestTable(t *testing.T, s *server, parent string) {
+	t.Helper()
+	_, err := s.CreateTable(context.Background(), &btapb.CreateTableRequest{
+		Parent: parent, TableId: "src",
+		Table: &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+}
+
+func assertViewEmptyThenFills(t *testing.T, s *server, parent string) {
+	t.Helper()
+	mvName := parent + "/materializedViews/by_b"
+	keys, err := readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+	require.NoError(t, s.SampleRowKeys(&btpb.SampleRowKeysRequest{MaterializedViewName: mvName}, &mockSampleStream{}))
+
+	putTestCell(t, s, parent+"/tables/src", "a1#b1")
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
+}
+
+// a view created before its source table reads as empty once the table exists.
+func TestMaterializedViewCreatedBeforeSourceTable(t *testing.T) {
+	s, parent := newTestInstanceServer(t)
+	_, err := s.CreateMaterializedView(context.Background(), &btapb.CreateMaterializedViewRequest{
+		Parent: parent, MaterializedViewId: "by_b", MaterializedView: &btapb.MaterializedView{Query: emptyViewSQL},
+	})
+	require.NoError(t, err)
+
+	// no source table yet: still NotFound.
+	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parent + "/materializedViews/by_b"})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+
+	createEmptyViewTestTable(t, s, parent)
+	assertViewEmptyThenFills(t, s, parent)
+}
+
+// a persisted view with no shadow table (restored on startup) reads as empty.
+func TestMaterializedViewRestoredWithoutShadowTable(t *testing.T) {
+	s, parent := newTestInstanceServer(t)
+	createEmptyViewTestTable(t, s, parent)
+	_, err := s.CreateMaterializedView(context.Background(), &btapb.CreateMaterializedViewRequest{
+		Parent: parent, MaterializedViewId: "by_b", MaterializedView: &btapb.MaterializedView{Query: emptyViewSQL},
+	})
+	require.NoError(t, err)
+
+	// simulate a DB written before shadow tables were created eagerly.
+	shadow := s.tables[parent+"/tables/by_b"]
+	s.tableBackend.Delete(shadow)
+	delete(s.tables, parent+"/tables/by_b")
+
+	s2 := &server{
+		tables: make(map[string]*table), materializedViews: make(map[string]*btapb.MaterializedView),
+		db: s.db, tableBackend: NewSqlTables(s.db), mvBackend: NewSqlMaterializedViews(s.db), cmvs: newCMVRegistry(),
+	}
+	s2.LoadTables()
+	s2.LoadMaterializedViews()
+	assertViewEmptyThenFills(t, s2, parent)
+}

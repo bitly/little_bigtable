@@ -310,6 +310,14 @@ func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest)
 	}
 	s.tables[tbl] = newTable(req, s.db)
 	s.tableBackend.Save(s.tables[tbl])
+	// views created before their source table get their shadow table now, so
+	// they read as empty instead of NotFound.
+	for _, cmv := range s.cmvs.cmvsForTable(tbl) {
+		mvName := cmv.parent + "/materializedViews/" + cmv.config.ViewID
+		if _, ok := s.materializedViews[mvName]; ok {
+			s.ensureCMVTable(cmv, s.tables[tbl])
+		}
+	}
 	s.mu.Unlock()
 
 	ct := &btapb.Table{
@@ -636,10 +644,36 @@ func (s *server) readableTable(tableName, materializedViewName string) (*table, 
 	fqView := strings.Replace(materializedViewName, "/materializedViews/", "/tables/", 1)
 	tbl, ok := s.tables[fqView]
 	if !ok {
-		// the view is registered but its source table has no shadow table yet.
-		return nil, status.Errorf(codes.NotFound, "materialized view %q has no backing table", materializedViewName)
+		// the view is registered but has no shadow table yet (the source table
+		// was created after the view, or the view was restored from a DB that
+		// never wrote one). Create it so the view reads as empty, like prod.
+		tbl = s.ensureViewTable(materializedViewName)
+	}
+	if tbl == nil {
+		return nil, status.Errorf(codes.NotFound, "materialized view %q has no backing table: source table not found", materializedViewName)
 	}
 	return tbl, nil
+}
+
+// ensureViewTable creates the shadow table of a registered materialized view
+// when its source table exists, and returns it (nil if the source is missing).
+// Must be called with s.mu held.
+func (s *server) ensureViewTable(materializedViewName string) *table {
+	cfg, ok := s.cmvs.get(viewIDFromName(materializedViewName))
+	if !ok {
+		return nil
+	}
+	idx := strings.LastIndex(materializedViewName, "/materializedViews/")
+	if idx < 0 {
+		return nil
+	}
+	parent := materializedViewName[:idx]
+	src, ok := s.tables[parent+"/tables/"+cfg.SourceTable]
+	if !ok {
+		return nil
+	}
+	s.ensureCMVTable(&cmvInstance{config: cfg, parent: parent}, src)
+	return s.tables[parent+"/tables/"+cfg.ViewID]
 }
 
 func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {

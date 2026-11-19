@@ -169,6 +169,11 @@ func (s *server) CreateMaterializedView(ctx context.Context, req *btapb.CreateMa
 		return nil, status.Errorf(codes.AlreadyExists, "materialized view %q already exists", name)
 	}
 
+	// a view's shadow table lives under the view's ID, so it can't reuse a table's.
+	if _, exists := s.tables[req.Parent+"/tables/"+req.MaterializedViewId]; exists {
+		return nil, status.Errorf(codes.AlreadyExists, "table %q already exists with that ID", req.MaterializedViewId)
+	}
+
 	s.cmvs.register(*cfg)
 	// create the shadow table now so reads of a view that has seen no writes
 	// yet are empty, like prod, instead of NotFound. If the source table doesn't

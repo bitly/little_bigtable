@@ -308,6 +308,11 @@ func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest)
 		s.mu.Unlock()
 		return nil, status.Errorf(codes.AlreadyExists, "table %q already exists", tbl)
 	}
+	// a view's shadow table lives under the view's ID, so a table can't reuse it.
+	if s.isViewTable(tbl) {
+		s.mu.Unlock()
+		return nil, status.Errorf(codes.AlreadyExists, "materialized view %q already exists with that ID", req.TableId)
+	}
 	s.tables[tbl] = newTable(req, s.db)
 	s.tableBackend.Save(s.tables[tbl])
 	// views created before their source table get their shadow table now, so
@@ -342,7 +347,8 @@ func (s *server) ListTables(ctx context.Context, req *btapb.ListTablesRequest) (
 
 	s.mu.Lock()
 	for tbl := range s.tables {
-		if strings.HasPrefix(tbl, prefix) {
+		// a view's shadow table is internal, not a table.
+		if strings.HasPrefix(tbl, prefix) && !s.isViewTable(tbl) {
 			res.Tables = append(res.Tables, &btapb.Table{Name: tbl})
 		}
 	}
@@ -356,8 +362,9 @@ func (s *server) GetTable(ctx context.Context, req *btapb.GetTableRequest) (*bta
 
 	s.mu.Lock()
 	tblIns, ok := s.tables[tbl]
+	isView := ok && s.isViewTable(tbl)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || isView {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", tbl)
 	}
 
@@ -404,7 +411,7 @@ func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tbl, ok := s.tables[req.Name]
-	if !ok {
+	if !ok || s.isViewTable(req.Name) {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 	s.tableBackend.Delete(tbl)
@@ -442,8 +449,9 @@ func (s *server) UndeleteTable(context.Context, *btapb.UndeleteTableRequest) (*l
 func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColumnFamiliesRequest) (*btapb.Table, error) {
 	s.mu.Lock()
 	tbl, ok := s.tables[req.Name]
+	isView := ok && s.isViewTable(req.Name)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || isView {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 
@@ -494,8 +502,9 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 func (s *server) DropRowRange(ctx context.Context, req *btapb.DropRowRangeRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	tbl, ok := s.tables[req.Name]
+	isView := ok && s.isViewTable(req.Name)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || isView {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 
@@ -659,21 +668,34 @@ func (s *server) readableTable(tableName, materializedViewName string) (*table, 
 // when its source table exists, and returns it (nil if the source is missing).
 // Must be called with s.mu held.
 func (s *server) ensureViewTable(materializedViewName string) *table {
-	cfg, ok := s.cmvs.get(viewIDFromName(materializedViewName))
+	mv, ok := s.materializedViews[materializedViewName]
 	if !ok {
 		return nil
 	}
-	idx := strings.LastIndex(materializedViewName, "/materializedViews/")
-	if idx < 0 {
+	viewID := viewIDFromName(materializedViewName)
+	// parse the config from this view's own query: the registry is keyed by
+	// view ID alone, so two instances' views with the same ID would collide.
+	cfg, err := ParseCMVConfigFromSQL(viewID, mv.Query)
+	if err != nil {
 		return nil
 	}
-	parent := materializedViewName[:idx]
+	parent, _ := splitFQView(materializedViewName)
 	src, ok := s.tables[parent+"/tables/"+cfg.SourceTable]
 	if !ok {
 		return nil
 	}
-	s.ensureCMVTable(&cmvInstance{config: cfg, parent: parent}, src)
+	s.ensureCMVTable(&cmvInstance{config: *cfg, parent: parent}, src)
 	return s.tables[parent+"/tables/"+cfg.ViewID]
+}
+
+// splitFQView splits "projects/p/instances/i/materializedViews/v" into parent and view ID.
+func splitFQView(name string) (parent, viewID string) {
+	const sep = "/materializedViews/"
+	idx := strings.LastIndex(name, sep)
+	if idx < 0 {
+		return "", name
+	}
+	return name[:idx], name[idx+len(sep):]
 }
 
 func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {

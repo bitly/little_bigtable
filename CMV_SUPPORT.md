@@ -49,7 +49,10 @@ derives the CMV key and deletes the corresponding CMV row.
 
 ### 4. Reading from the CMV
 
-Since the CMV shadow table is a regular table, reads use the standard approach. View row keys
+Open a view with `client.OpenMaterializedView`. The emulator stores a view's rows in an internal
+shadow table, but like prod Bigtable it isn't a client-facing table: requests that address it by
+table name (`client.Open`) return `NotFound`, and it is hidden from `ListTables`. A view that has
+had no writes reads as empty. View row keys
 use prod Bigtable's encoding (see [Example: Key Transformation](#example-key-transformation)):
 each key column is terminated with `\x00\x01`, so do not build lookup keys by joining
 columns with `#`.
@@ -60,7 +63,7 @@ columns with `#`.
 key := "region-a\x00\x01account-42\x00\x019999999\x00\x01type-x\x00\x01item-abc\x00\x01" +
     "item-abc#9999999#type-x#region-a#account-42"
 
-table := client.Open("events_by_account")
+table := client.OpenMaterializedView("events_by_account")
 row, err := table.ReadRow(ctx, key)
 ```
 

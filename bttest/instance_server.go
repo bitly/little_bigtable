@@ -170,6 +170,12 @@ func (s *server) CreateMaterializedView(ctx context.Context, req *btapb.CreateMa
 	}
 
 	s.cmvs.register(*cfg)
+	// create the shadow table now so reads of a view that has seen no writes
+	// yet are empty, like prod, instead of NotFound. If the source table doesn't
+	// exist yet, the first write to it creates the shadow table.
+	if src, ok := s.tables[req.Parent+"/tables/"+cfg.SourceTable]; ok {
+		s.ensureCMVTable(&cmvInstance{config: *cfg, parent: req.Parent}, src)
+	}
 	stored := &btapb.MaterializedView{
 		Name:               name,
 		Query:              mv.Query,

@@ -11,6 +11,9 @@ import (
 	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
@@ -715,3 +718,84 @@ func TestCMVMigrateSkipsSingleColumnViews(t *testing.T) {
 	// Single-column keys are identical in both formats; nothing is rebuilt.
 	assert.Equal(t, []string{"b"}, cmvViewKeys(t, viewTbl))
 }
+
+func readRowKeys(t *testing.T, s *server, req *btpb.ReadRowsRequest) ([]string, error) {
+	t.Helper()
+	mock := &MockReadRowsServer{}
+	if err := s.ReadRows(req, mock); err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, resp := range mock.responses {
+		for _, c := range resp.Chunks {
+			if len(c.RowKey) > 0 {
+				keys = append(keys, string(c.RowKey))
+			}
+		}
+	}
+	return keys, nil
+}
+
+// prod serves a view only by its materializedViews/ name, which clients send as
+// materialized_view_name; the emulator resolves it to the view's shadow table.
+func TestReadRowsMaterializedViewName(t *testing.T) {
+	ctx := context.Background()
+	s, parent := newTestInstanceServer(t)
+
+	_, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  parent,
+		TableId: "src",
+		Table:   &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+
+	mvSQL := "SELECT\n" +
+		"  SPLIT(_key, '#')[SAFE_OFFSET(1)] AS b,\n" +
+		"  SPLIT(_key, '#')[SAFE_OFFSET(0)] AS a,\n" +
+		"  _key AS src_key,\n" +
+		"  cf1 AS cf1\n" +
+		"FROM `src`\n" +
+		"ORDER BY b, a, src_key"
+	_, err = s.CreateMaterializedView(ctx, &btapb.CreateMaterializedViewRequest{
+		Parent:             parent,
+		MaterializedViewId: "by_b",
+		MaterializedView:   &btapb.MaterializedView{Query: mvSQL},
+	})
+	require.NoError(t, err)
+	mvName := parent + "/materializedViews/by_b"
+
+	// a view that has seen no writes reads as empty, not NotFound.
+	keys, err := readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	putTestCell(t, s, parent+"/tables/src", "a1#b1")
+
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b1\x00\x01a1\x00\x01a1#b1"}, keys)
+
+	// a prefix scan, as the Go client sends for a view.
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{
+		MaterializedViewName: mvName,
+		Rows: &btpb.RowSet{RowRanges: []*btpb.RowRange{{
+			StartKey: &btpb.RowRange_StartKeyClosed{StartKeyClosed: []byte("b1\x00\x01")},
+			EndKey:   &btpb.RowRange_EndKeyOpen{EndKeyOpen: []byte("b1\x00\x02")},
+		}}},
+	})
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
+
+	// SampleRowKeys resolves the view name too.
+	require.NoError(t, s.SampleRowKeys(&btpb.SampleRowKeysRequest{MaterializedViewName: mvName}, &mockSampleStream{}))
+
+	// an unknown view is NotFound.
+	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parent + "/materializedViews/nope"})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+type mockSampleStream struct {
+	grpc.ServerStream
+}
+
+func (m *mockSampleStream) Send(*btpb.SampleRowKeysResponse) error { return nil }

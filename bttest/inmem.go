@@ -607,12 +607,36 @@ func (s *server) RestoreTable(context.Context, *btapb.RestoreTableRequest) (*lon
 	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support restores")
 }
 
-func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {
+// readableTable returns the table that serves a read. Prod Bigtable serves a
+// materialized view only through its materializedViews/ resource name, which
+// clients send in the request's materialized_view_name (bigtable.Client.OpenMaterializedView);
+// the emulator keeps a view's rows in a shadow table, so that name resolves to it.
+func (s *server) readableTable(tableName, materializedViewName string) (*table, error) {
 	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if materializedViewName == "" {
+		tbl, ok := s.tables[tableName]
+		if !ok {
+			return nil, status.Errorf(codes.NotFound, "table %q not found", tableName)
+		}
+		return tbl, nil
+	}
+	if _, ok := s.materializedViews[materializedViewName]; !ok {
+		return nil, status.Errorf(codes.NotFound, "materialized view %q not found", materializedViewName)
+	}
+	fqView := strings.Replace(materializedViewName, "/materializedViews/", "/tables/", 1)
+	tbl, ok := s.tables[fqView]
 	if !ok {
-		return status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+		// the view is registered but its source table has no shadow table yet.
+		return nil, status.Errorf(codes.NotFound, "materialized view %q has no backing table", materializedViewName)
+	}
+	return tbl, nil
+}
+
+func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {
+	tbl, err := s.readableTable(req.TableName, req.MaterializedViewName)
+	if err != nil {
+		return err
 	}
 
 	if err := validateRowRanges(req); err != nil {
@@ -1539,11 +1563,9 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 }
 
 func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigtable_SampleRowKeysServer) error {
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, req.MaterializedViewName)
+	if err != nil {
+		return err
 	}
 
 	tbl.mu.RLock()
@@ -1552,7 +1574,6 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 	// The return value of SampleRowKeys is very loosely defined. Return at least the
 	// final row key in the table and choose other row keys randomly.
 	var offset int64
-	var err error
 	i := 0
 
 	len := tbl.rows.Len()

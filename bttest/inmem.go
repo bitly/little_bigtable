@@ -607,7 +607,15 @@ func (s *server) RestoreTable(context.Context, *btapb.RestoreTableRequest) (*lon
 	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support restores")
 }
 
-// readableTable returns the table that serves a read. Prod Bigtable serves a
+// isViewTable reports whether the table is the shadow table of a materialized
+// view. Must be called with s.mu held.
+func (s *server) isViewTable(fqTable string) bool {
+	parent, id := splitFQTable(fqTable)
+	_, ok := s.materializedViews[parent+"/materializedViews/"+id]
+	return ok
+}
+
+// readableTable returns the table that serves a data request (reads and writes). Prod Bigtable serves a
 // materialized view only through its materializedViews/ resource name, which
 // clients send in the request's materialized_view_name (bigtable.Client.OpenMaterializedView);
 // the emulator keeps a view's rows in a shadow table, so that name resolves to it.
@@ -616,7 +624,8 @@ func (s *server) readableTable(tableName, materializedViewName string) (*table, 
 	defer s.mu.Unlock()
 	if materializedViewName == "" {
 		tbl, ok := s.tables[tableName]
-		if !ok {
+		// like prod, a view isn't a table: it's reachable only by its materialized view name.
+		if !ok || s.isViewTable(tableName) {
 			return nil, status.Errorf(codes.NotFound, "table %q not found", tableName)
 		}
 		return tbl, nil
@@ -1142,11 +1151,9 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 			"No mutations provided",
 		)
 	}
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return nil, err
 	}
 	fs := tbl.columnFamilies()
 
@@ -1199,11 +1206,9 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 			"No mutations provided",
 		)
 	}
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return err
 	}
 	res := &btpb.MutateRowsResponse{Entries: make([]*btpb.MutateRowsResponse_Entry, len(req.Entries))}
 
@@ -1266,11 +1271,9 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 }
 
 func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutateRowRequest) (*btpb.CheckAndMutateRowResponse, error) {
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return nil, err
 	}
 	res := &btpb.CheckAndMutateRowResponse{}
 
@@ -1453,11 +1456,9 @@ func appendOrReplaceCell(cs []cell, newCell cell) []cell {
 }
 
 func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWriteRowRequest) (*btpb.ReadModifyWriteRowResponse, error) {
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return nil, err
 	}
 
 	cfs := tbl.columnFamilies()

@@ -789,6 +789,16 @@ func TestReadRowsMaterializedViewName(t *testing.T) {
 	// SampleRowKeys resolves the view name too.
 	require.NoError(t, s.SampleRowKeys(&btpb.SampleRowKeysRequest{MaterializedViewName: mvName}, &mockSampleStream{}))
 
+	// like prod, the view isn't a table: reads and writes by table name are NotFound.
+	fqView := parent + "/tables/by_b"
+	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{TableName: fqView})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	assert.Equal(t, codes.NotFound, status.Code(s.SampleRowKeys(&btpb.SampleRowKeysRequest{TableName: fqView}, &mockSampleStream{})))
+	_, err = s.MutateRow(ctx, &btpb.MutateRowRequest{TableName: fqView, RowKey: []byte("k"), Mutations: []*btpb.Mutation{{
+		Mutation: &btpb.Mutation_SetCell_{SetCell: &btpb.Mutation_SetCell{FamilyName: "cf1", ColumnQualifier: []byte("c"), Value: []byte("v")}},
+	}}})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+
 	// an unknown view is NotFound.
 	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parent + "/materializedViews/nope"})
 	assert.Equal(t, codes.NotFound, status.Code(err))

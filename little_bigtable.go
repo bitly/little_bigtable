@@ -14,8 +14,8 @@ import (
 	"runtime/debug"
 
 	"github.com/bitly/little_bigtable/bttest"
-	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -62,7 +62,7 @@ func main() {
 		log.Fatal("missing --db-file")
 	}
 
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", *dbFile))
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?cache=shared", *dbFile))
 	if err != nil {
 		log.Fatalf("failed creating sqlite3 connection %v", err)
 	}

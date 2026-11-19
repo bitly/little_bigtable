@@ -16,7 +16,7 @@ import (
 
 func newTestServerWithCMV(t *testing.T, configs []CMVConfig) *server {
 	dbFilename := newDBFile(t)
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", dbFilename))
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?cache=shared", dbFilename))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
@@ -351,7 +351,7 @@ func TestCMVTransformKeyOutOfBounds(t *testing.T) {
 func TestCreateMaterializedViewRPC(t *testing.T) {
 	ctx := context.Background()
 	dbFilename := newDBFile(t)
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared", dbFilename))
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?cache=shared", dbFilename))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
@@ -497,7 +497,7 @@ func TestCMVDropRowRangePrefix(t *testing.T) {
 func newTestInstanceServer(t *testing.T) (*server, string) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)

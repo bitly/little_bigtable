@@ -6,8 +6,6 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log"
-
-	"github.com/mattn/go-sqlite3"
 )
 
 // SqlTables persists tables to tables_t
@@ -99,7 +97,7 @@ func (db *SqlTables) Save(t *table) {
 		log.Fatal(err)
 	}
 	_, err = db.db.Exec("INSERT INTO tables_t (parent, table_id, metadata) VALUES (?, ?, ?)", t.parent, t.tableId, metadata)
-	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
+	if isConstraintErr(err) {
 		_, err = db.db.Exec("UPDATE tables_t SET metadata = ? WHERE parent = ? AND table_id = ?", metadata, t.parent, t.tableId)
 	}
 	if err != nil {

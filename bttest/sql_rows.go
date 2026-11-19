@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/google/btree"
-	"github.com/mattn/go-sqlite3"
 )
 
 // SqlRows is a backend modeled on the github.com/google/btree interface
@@ -181,7 +180,7 @@ func (db *SqlRows) ReplaceOrInsert(item Item) Item {
 	defer db.mu.Unlock()
 
 	_, err = db.db.Exec("INSERT INTO rows_t (parent, table_id, row_key, families) values (?, ?, ?, ?)", db.parent, db.tableId, row.key, families)
-	if e, ok := err.(sqlite3.Error); ok && e.Code == 19 {
+	if isConstraintErr(err) {
 		_, err = db.db.Exec("UPDATE rows_t SET families = ? WHERE parent = ? AND table_id = ? AND row_key = ?", families, db.parent, db.tableId, row.key)
 	}
 	if err != nil {

@@ -11,6 +11,9 @@ import (
 	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
@@ -714,4 +717,252 @@ func TestCMVMigrateSkipsSingleColumnViews(t *testing.T) {
 
 	// Single-column keys are identical in both formats; nothing is rebuilt.
 	assert.Equal(t, []string{"b"}, cmvViewKeys(t, viewTbl))
+}
+
+func readRowKeys(t *testing.T, s *server, req *btpb.ReadRowsRequest) ([]string, error) {
+	t.Helper()
+	mock := &MockReadRowsServer{}
+	if err := s.ReadRows(req, mock); err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, resp := range mock.responses {
+		for _, c := range resp.Chunks {
+			if len(c.RowKey) > 0 {
+				keys = append(keys, string(c.RowKey))
+			}
+		}
+	}
+	return keys, nil
+}
+
+// prod serves a view only by its materializedViews/ name, which clients send as
+// materialized_view_name; the emulator resolves it to the view's shadow table.
+func TestReadRowsMaterializedViewName(t *testing.T) {
+	ctx := context.Background()
+	s, parent := newTestInstanceServer(t)
+
+	_, err := s.CreateTable(ctx, &btapb.CreateTableRequest{
+		Parent:  parent,
+		TableId: "src",
+		Table:   &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+
+	mvSQL := "SELECT\n" +
+		"  SPLIT(_key, '#')[SAFE_OFFSET(1)] AS b,\n" +
+		"  SPLIT(_key, '#')[SAFE_OFFSET(0)] AS a,\n" +
+		"  _key AS src_key,\n" +
+		"  cf1 AS cf1\n" +
+		"FROM `src`\n" +
+		"ORDER BY b, a, src_key"
+	_, err = s.CreateMaterializedView(ctx, &btapb.CreateMaterializedViewRequest{
+		Parent:             parent,
+		MaterializedViewId: "by_b",
+		MaterializedView:   &btapb.MaterializedView{Query: mvSQL},
+	})
+	require.NoError(t, err)
+	mvName := parent + "/materializedViews/by_b"
+
+	// a view that has seen no writes reads as empty, not NotFound.
+	keys, err := readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	putTestCell(t, s, parent+"/tables/src", "a1#b1")
+
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b1\x00\x01a1\x00\x01a1#b1"}, keys)
+
+	// a prefix scan, as the Go client sends for a view.
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{
+		MaterializedViewName: mvName,
+		Rows: &btpb.RowSet{RowRanges: []*btpb.RowRange{{
+			StartKey: &btpb.RowRange_StartKeyClosed{StartKeyClosed: []byte("b1\x00\x01")},
+			EndKey:   &btpb.RowRange_EndKeyOpen{EndKeyOpen: []byte("b1\x00\x02")},
+		}}},
+	})
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
+
+	// SampleRowKeys resolves the view name too.
+	require.NoError(t, s.SampleRowKeys(&btpb.SampleRowKeysRequest{MaterializedViewName: mvName}, &mockSampleStream{}))
+
+	// like prod, the view isn't a table: reads and writes by table name are NotFound.
+	fqView := parent + "/tables/by_b"
+	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{TableName: fqView})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	assert.Equal(t, codes.NotFound, status.Code(s.SampleRowKeys(&btpb.SampleRowKeysRequest{TableName: fqView}, &mockSampleStream{})))
+	_, err = s.MutateRow(ctx, &btpb.MutateRowRequest{TableName: fqView, RowKey: []byte("k"), Mutations: []*btpb.Mutation{{
+		Mutation: &btpb.Mutation_SetCell_{SetCell: &btpb.Mutation_SetCell{FamilyName: "cf1", ColumnQualifier: []byte("c"), Value: []byte("v")}},
+	}}})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+
+	// an unknown view is NotFound.
+	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parent + "/materializedViews/nope"})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+type mockSampleStream struct {
+	grpc.ServerStream
+}
+
+func (m *mockSampleStream) Send(*btpb.SampleRowKeysResponse) error { return nil }
+
+const emptyViewSQL = "SELECT\n" +
+	"  SPLIT(_key, '#')[SAFE_OFFSET(1)] AS b,\n" +
+	"  SPLIT(_key, '#')[SAFE_OFFSET(0)] AS a,\n" +
+	"  _key AS src_key,\n" +
+	"  cf1 AS cf1\n" +
+	"FROM `src`\n" +
+	"ORDER BY b, a, src_key"
+
+func createEmptyViewTestTable(t *testing.T, s *server, parent string) {
+	t.Helper()
+	_, err := s.CreateTable(context.Background(), &btapb.CreateTableRequest{
+		Parent: parent, TableId: "src",
+		Table: &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}},
+	})
+	require.NoError(t, err)
+}
+
+func assertViewEmptyThenFills(t *testing.T, s *server, parent string) {
+	t.Helper()
+	mvName := parent + "/materializedViews/by_b"
+	keys, err := readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+	require.NoError(t, s.SampleRowKeys(&btpb.SampleRowKeysRequest{MaterializedViewName: mvName}, &mockSampleStream{}))
+
+	putTestCell(t, s, parent+"/tables/src", "a1#b1")
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: mvName})
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
+}
+
+// a view created before its source table reads as empty once the table exists.
+func TestMaterializedViewCreatedBeforeSourceTable(t *testing.T) {
+	s, parent := newTestInstanceServer(t)
+	_, err := s.CreateMaterializedView(context.Background(), &btapb.CreateMaterializedViewRequest{
+		Parent: parent, MaterializedViewId: "by_b", MaterializedView: &btapb.MaterializedView{Query: emptyViewSQL},
+	})
+	require.NoError(t, err)
+
+	// no source table yet: still NotFound.
+	_, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parent + "/materializedViews/by_b"})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+
+	createEmptyViewTestTable(t, s, parent)
+	assertViewEmptyThenFills(t, s, parent)
+}
+
+// a persisted view with no shadow table (restored on startup) reads as empty.
+func TestMaterializedViewRestoredWithoutShadowTable(t *testing.T) {
+	s, parent := newTestInstanceServer(t)
+	createEmptyViewTestTable(t, s, parent)
+	_, err := s.CreateMaterializedView(context.Background(), &btapb.CreateMaterializedViewRequest{
+		Parent: parent, MaterializedViewId: "by_b", MaterializedView: &btapb.MaterializedView{Query: emptyViewSQL},
+	})
+	require.NoError(t, err)
+
+	// simulate a DB written before shadow tables were created eagerly.
+	shadow := s.tables[parent+"/tables/by_b"]
+	s.tableBackend.Delete(shadow)
+	delete(s.tables, parent+"/tables/by_b")
+
+	s2 := &server{
+		tables: make(map[string]*table), materializedViews: make(map[string]*btapb.MaterializedView),
+		db: s.db, tableBackend: NewSqlTables(s.db), mvBackend: NewSqlMaterializedViews(s.db), cmvs: newCMVRegistry(),
+	}
+	s2.LoadTables()
+	s2.LoadMaterializedViews()
+	assertViewEmptyThenFills(t, s2, parent)
+}
+
+func createEmptyView(t *testing.T, s *server, parent, id string) error {
+	t.Helper()
+	_, err := s.CreateMaterializedView(context.Background(), &btapb.CreateMaterializedViewRequest{
+		Parent: parent, MaterializedViewId: id, MaterializedView: &btapb.MaterializedView{Query: emptyViewSQL},
+	})
+	return err
+}
+
+// a table and a view can't share an ID, in either creation order.
+func TestMaterializedViewTableIDCollision(t *testing.T) {
+	ctx := context.Background()
+	s, parent := newTestInstanceServer(t)
+	createEmptyViewTestTable(t, s, parent)
+
+	// table exists -> view with that ID rejected.
+	err := createEmptyView(t, s, parent, "src")
+	assert.Equal(t, codes.AlreadyExists, status.Code(err))
+
+	// view registered before its source table -> table with the view's ID rejected,
+	// and the view keeps serving.
+	s2, parent := newTestInstanceServer(t)
+	require.NoError(t, createEmptyView(t, s2, parent, "by_b"))
+	_, err = s2.CreateTable(ctx, &btapb.CreateTableRequest{Parent: parent, TableId: "by_b",
+		Table: &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}}})
+	assert.Equal(t, codes.AlreadyExists, status.Code(err))
+	createEmptyViewTestTable(t, s2, parent)
+	assertViewEmptyThenFills(t, s2, parent)
+}
+
+// a view's shadow table is hidden from, and untouchable by, table-admin RPCs.
+func TestMaterializedViewShadowHiddenFromTableAdmin(t *testing.T) {
+	ctx := context.Background()
+	s, parent := newTestInstanceServer(t)
+	createEmptyViewTestTable(t, s, parent)
+	require.NoError(t, createEmptyView(t, s, parent, "by_b"))
+	shadow := parent + "/tables/by_b"
+	require.Contains(t, s.tables, shadow)
+
+	list, err := s.ListTables(ctx, &btapb.ListTablesRequest{Parent: parent})
+	require.NoError(t, err)
+	require.Len(t, list.Tables, 1)
+	assert.Equal(t, parent+"/tables/src", list.Tables[0].Name)
+
+	_, err = s.GetTable(ctx, &btapb.GetTableRequest{Name: shadow})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	_, err = s.DeleteTable(ctx, &btapb.DeleteTableRequest{Name: shadow})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	_, err = s.ModifyColumnFamilies(ctx, &btapb.ModifyColumnFamiliesRequest{Name: shadow})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	_, err = s.DropRowRange(ctx, &btapb.DropRowRangeRequest{Name: shadow, Target: &btapb.DropRowRangeRequest_DeleteAllDataFromTable{DeleteAllDataFromTable: true}})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	assert.Contains(t, s.tables, shadow)
+}
+
+// lazy shadow creation uses the requested view's own query, even when another
+// instance has a view with the same ID over a different source table.
+func TestMaterializedViewLazyShadowSameIDTwoInstances(t *testing.T) {
+	ctx := context.Background()
+	s, parentA := newTestInstanceServer(t)
+	parentB := "projects/test/instances/other"
+	createEmptyViewTestTable(t, s, parentA)
+	// instance B has no "src": its view reads a different source table (other_src).
+	_, err := s.CreateTable(ctx, &btapb.CreateTableRequest{Parent: parentB, TableId: "other_src",
+		Table: &btapb.Table{ColumnFamilies: map[string]*btapb.ColumnFamily{"cf1": {}}}})
+	require.NoError(t, err)
+	require.NoError(t, createEmptyView(t, s, parentA, "by_b"))
+	_, err = s.CreateMaterializedView(ctx, &btapb.CreateMaterializedViewRequest{
+		Parent: parentB, MaterializedViewId: "by_b",
+		MaterializedView: &btapb.MaterializedView{Query: strings.Replace(emptyViewSQL, "`src`", "`other_src`", 1)},
+	})
+	require.NoError(t, err)
+
+	// drop B's shadow, as if restored from a DB without one.
+	delete(s.tables, parentB+"/tables/by_b")
+
+	// the registry is keyed by view ID alone, so it can't pick B's config reliably.
+	keys, err := readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parentB + "/materializedViews/by_b"})
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+
+	// writes to B's own source reach B's shadow.
+	putTestCell(t, s, parentB+"/tables/other_src", "a1#b1")
+	keys, err = readRowKeys(t, s, &btpb.ReadRowsRequest{MaterializedViewName: parentB + "/materializedViews/by_b"})
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
 }

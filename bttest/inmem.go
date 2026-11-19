@@ -308,8 +308,21 @@ func (s *server) CreateTable(ctx context.Context, req *btapb.CreateTableRequest)
 		s.mu.Unlock()
 		return nil, status.Errorf(codes.AlreadyExists, "table %q already exists", tbl)
 	}
+	// a view's shadow table lives under the view's ID, so a table can't reuse it.
+	if s.isViewTable(tbl) {
+		s.mu.Unlock()
+		return nil, status.Errorf(codes.AlreadyExists, "materialized view %q already exists with that ID", req.TableId)
+	}
 	s.tables[tbl] = newTable(req, s.db)
 	s.tableBackend.Save(s.tables[tbl])
+	// views created before their source table get their shadow table now, so
+	// they read as empty instead of NotFound.
+	for _, cmv := range s.cmvs.cmvsForTable(tbl) {
+		mvName := cmv.parent + "/materializedViews/" + cmv.config.ViewID
+		if _, ok := s.materializedViews[mvName]; ok {
+			s.ensureCMVTable(cmv, s.tables[tbl])
+		}
+	}
 	s.mu.Unlock()
 
 	ct := &btapb.Table{
@@ -334,7 +347,8 @@ func (s *server) ListTables(ctx context.Context, req *btapb.ListTablesRequest) (
 
 	s.mu.Lock()
 	for tbl := range s.tables {
-		if strings.HasPrefix(tbl, prefix) {
+		// a view's shadow table is internal, not a table.
+		if strings.HasPrefix(tbl, prefix) && !s.isViewTable(tbl) {
 			res.Tables = append(res.Tables, &btapb.Table{Name: tbl})
 		}
 	}
@@ -348,8 +362,9 @@ func (s *server) GetTable(ctx context.Context, req *btapb.GetTableRequest) (*bta
 
 	s.mu.Lock()
 	tblIns, ok := s.tables[tbl]
+	isView := ok && s.isViewTable(tbl)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || isView {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", tbl)
 	}
 
@@ -396,7 +411,7 @@ func (s *server) DeleteTable(ctx context.Context, req *btapb.DeleteTableRequest)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tbl, ok := s.tables[req.Name]
-	if !ok {
+	if !ok || s.isViewTable(req.Name) {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 	s.tableBackend.Delete(tbl)
@@ -434,8 +449,9 @@ func (s *server) UndeleteTable(context.Context, *btapb.UndeleteTableRequest) (*l
 func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColumnFamiliesRequest) (*btapb.Table, error) {
 	s.mu.Lock()
 	tbl, ok := s.tables[req.Name]
+	isView := ok && s.isViewTable(req.Name)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || isView {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 
@@ -486,8 +502,9 @@ func (s *server) ModifyColumnFamilies(ctx context.Context, req *btapb.ModifyColu
 func (s *server) DropRowRange(ctx context.Context, req *btapb.DropRowRangeRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	tbl, ok := s.tables[req.Name]
+	isView := ok && s.isViewTable(req.Name)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || isView {
 		return nil, status.Errorf(codes.NotFound, "table %q not found", req.Name)
 	}
 
@@ -607,12 +624,84 @@ func (s *server) RestoreTable(context.Context, *btapb.RestoreTableRequest) (*lon
 	return nil, status.Errorf(codes.Unimplemented, "the emulator does not currently support restores")
 }
 
-func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {
+// isViewTable reports whether the table is the shadow table of a materialized
+// view. Must be called with s.mu held.
+func (s *server) isViewTable(fqTable string) bool {
+	parent, id := splitFQTable(fqTable)
+	_, ok := s.materializedViews[parent+"/materializedViews/"+id]
+	return ok
+}
+
+// readableTable returns the table that serves a data request (reads and writes). Prod Bigtable serves a
+// materialized view only through its materializedViews/ resource name, which
+// clients send in the request's materialized_view_name (bigtable.Client.OpenMaterializedView);
+// the emulator keeps a view's rows in a shadow table, so that name resolves to it.
+func (s *server) readableTable(tableName, materializedViewName string) (*table, error) {
 	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if materializedViewName == "" {
+		tbl, ok := s.tables[tableName]
+		// like prod, a view isn't a table: it's reachable only by its materialized view name.
+		if !ok || s.isViewTable(tableName) {
+			return nil, status.Errorf(codes.NotFound, "table %q not found", tableName)
+		}
+		return tbl, nil
+	}
+	if _, ok := s.materializedViews[materializedViewName]; !ok {
+		return nil, status.Errorf(codes.NotFound, "materialized view %q not found", materializedViewName)
+	}
+	fqView := strings.Replace(materializedViewName, "/materializedViews/", "/tables/", 1)
+	tbl, ok := s.tables[fqView]
 	if !ok {
-		return status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+		// the view is registered but has no shadow table yet (the source table
+		// was created after the view, or the view was restored from a DB that
+		// never wrote one). Create it so the view reads as empty, like prod.
+		tbl = s.ensureViewTable(materializedViewName)
+	}
+	if tbl == nil {
+		return nil, status.Errorf(codes.NotFound, "materialized view %q has no backing table: source table not found", materializedViewName)
+	}
+	return tbl, nil
+}
+
+// ensureViewTable creates the shadow table of a registered materialized view
+// when its source table exists, and returns it (nil if the source is missing).
+// Must be called with s.mu held.
+func (s *server) ensureViewTable(materializedViewName string) *table {
+	mv, ok := s.materializedViews[materializedViewName]
+	if !ok {
+		return nil
+	}
+	viewID := viewIDFromName(materializedViewName)
+	// parse the config from this view's own query: the registry is keyed by
+	// view ID alone, so two instances' views with the same ID would collide.
+	cfg, err := ParseCMVConfigFromSQL(viewID, mv.Query)
+	if err != nil {
+		return nil
+	}
+	parent, _ := splitFQView(materializedViewName)
+	src, ok := s.tables[parent+"/tables/"+cfg.SourceTable]
+	if !ok {
+		return nil
+	}
+	s.ensureCMVTable(&cmvInstance{config: *cfg, parent: parent}, src)
+	return s.tables[parent+"/tables/"+cfg.ViewID]
+}
+
+// splitFQView splits "projects/p/instances/i/materializedViews/v" into parent and view ID.
+func splitFQView(name string) (parent, viewID string) {
+	const sep = "/materializedViews/"
+	idx := strings.LastIndex(name, sep)
+	if idx < 0 {
+		return "", name
+	}
+	return name[:idx], name[idx+len(sep):]
+}
+
+func (s *server) ReadRows(req *btpb.ReadRowsRequest, stream btpb.Bigtable_ReadRowsServer) error {
+	tbl, err := s.readableTable(req.TableName, req.MaterializedViewName)
+	if err != nil {
+		return err
 	}
 
 	if err := validateRowRanges(req); err != nil {
@@ -1118,11 +1207,9 @@ func (s *server) MutateRow(ctx context.Context, req *btpb.MutateRowRequest) (*bt
 			"No mutations provided",
 		)
 	}
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return nil, err
 	}
 	fs := tbl.columnFamilies()
 
@@ -1175,11 +1262,9 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 			"No mutations provided",
 		)
 	}
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return err
 	}
 	res := &btpb.MutateRowsResponse{Entries: make([]*btpb.MutateRowsResponse_Entry, len(req.Entries))}
 
@@ -1242,11 +1327,9 @@ func (s *server) MutateRows(req *btpb.MutateRowsRequest, stream btpb.Bigtable_Mu
 }
 
 func (s *server) CheckAndMutateRow(ctx context.Context, req *btpb.CheckAndMutateRowRequest) (*btpb.CheckAndMutateRowResponse, error) {
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return nil, err
 	}
 	res := &btpb.CheckAndMutateRowResponse{}
 
@@ -1429,11 +1512,9 @@ func appendOrReplaceCell(cs []cell, newCell cell) []cell {
 }
 
 func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWriteRowRequest) (*btpb.ReadModifyWriteRowResponse, error) {
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, "")
+	if err != nil {
+		return nil, err
 	}
 
 	cfs := tbl.columnFamilies()
@@ -1539,11 +1620,9 @@ func (s *server) ReadModifyWriteRow(ctx context.Context, req *btpb.ReadModifyWri
 }
 
 func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigtable_SampleRowKeysServer) error {
-	s.mu.Lock()
-	tbl, ok := s.tables[req.TableName]
-	s.mu.Unlock()
-	if !ok {
-		return status.Errorf(codes.NotFound, "table %q not found", req.TableName)
+	tbl, err := s.readableTable(req.TableName, req.MaterializedViewName)
+	if err != nil {
+		return err
 	}
 
 	tbl.mu.RLock()
@@ -1552,7 +1631,6 @@ func (s *server) SampleRowKeys(req *btpb.SampleRowKeysRequest, stream btpb.Bigta
 	// The return value of SampleRowKeys is very loosely defined. Return at least the
 	// final row key in the table and choose other row keys randomly.
 	var offset int64
-	var err error
 	i := 0
 
 	len := tbl.rows.Len()

@@ -26,7 +26,7 @@ jobs:
       SRCDIR: "go/src/github.com/bitly/little_bigtable"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
         with:
           path: ${{env.SRCDIR}}
           persist-credentials: false

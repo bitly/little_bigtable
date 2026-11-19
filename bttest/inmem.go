@@ -134,6 +134,7 @@ func NewServer(laddr string, db *sql.DB, opt ...grpc.ServerOption) (*Server, err
 	longrunningpb.RegisterOperationsServer(s.srv, opsServer)
 	s.s.LoadTables()
 	s.s.LoadMaterializedViews()
+	s.s.MigrateLegacyCMVKeys()
 	btapb.RegisterBigtableInstanceAdminServer(s.srv, s.s)
 	btapb.RegisterBigtableTableAdminServer(s.srv, s.s)
 	btpb.RegisterBigtableServer(s.srv, s.s)

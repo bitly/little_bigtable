@@ -4,7 +4,6 @@ on:
 
 permissions:
     contents: write
-    packages: write
 
 jobs:
   releases-matrix:
@@ -15,8 +14,10 @@ jobs:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v7
-    - uses: wangyoucao577/go-release-action@v1
+    - uses: actions/checkout@v7.0.1
+      with:
+        persist-credentials: false
+    - uses: wangyoucao577/go-release-action@v1.55
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: ${{ matrix.goos }}

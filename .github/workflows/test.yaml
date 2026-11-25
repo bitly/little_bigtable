@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         imgtag:
-          - "golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf"
+          - "golang:1.27"
         goarch:
           - "amd64"
 
@@ -26,7 +26,7 @@ jobs:
       SRCDIR: "go/src/github.com/bitly/little_bigtable"
 
     steps:
-      - uses: actions/checkout@v6.1.0
+      - uses: actions/checkout@v6
         with:
           path: ${{env.SRCDIR}}
           persist-credentials: false
